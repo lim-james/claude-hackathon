@@ -119,6 +119,17 @@ class PDFTests(unittest.TestCase):
             pix = doc[0].get_pixmap()
             self.assertEqual(pix.pixel(pix.width * 3 // 4, pix.height // 2), (255, 255, 255))
 
+    def test_image_pdf_applies_exif_orientation(self):
+        image = self.root / 'rotated.jpg'
+        source = Image.new('RGB', (20, 10), 'red')
+        exif = Image.Exif()
+        exif[274] = 6
+        source.save(image, exif=exif)
+        output = self.root / 'rotated.pdf'
+        images_to_pdf([image], output)
+        with fitz.open(output) as doc:
+            self.assertGreater(doc[0].rect.height, doc[0].rect.width)
+
     def test_sanitize(self):
         self.pdf.doc.set_metadata({'author': 'Private'})
         self.pdf.doc.embfile_add('secret.txt', b'secret')
