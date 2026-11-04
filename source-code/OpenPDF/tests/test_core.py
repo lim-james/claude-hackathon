@@ -24,6 +24,14 @@ class PDFTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 page_numbers(spec, 3)
 
+    def test_page_number_is_centered_at_bottom_of_rotated_page(self):
+        page = self.pdf.doc[0]
+        page.set_rotation(90)
+        self.pdf.number_pages()
+        displayed = page.search_for('1 / 1')[0] * page.rotation_matrix
+        self.assertAlmostEqual((displayed.x0 + displayed.x1) / 2, page.rect.width / 2, delta=10)
+        self.assertGreater(displayed.y0, page.rect.height - 40)
+
     def test_merge_select_split(self):
         source = self.root / 'source.pdf'
         self.pdf.save(source)
@@ -100,6 +108,28 @@ class PDFTests(unittest.TestCase):
         with fitz.open(self.root / 'image.pdf') as doc:
             self.assertEqual(len(doc[0].get_images()), 1)
 
+    def test_transparent_image_background_is_white_in_pdf(self):
+        image = self.root / 'transparent.png'
+        source = Image.new('RGBA', (20, 10), (0, 0, 0, 0))
+        source.paste((255, 0, 0, 255), (0, 0, 10, 10))
+        source.save(image)
+        output = self.root / 'transparent.pdf'
+        images_to_pdf([image], output)
+        with fitz.open(output) as doc:
+            pix = doc[0].get_pixmap()
+            self.assertEqual(pix.pixel(pix.width * 3 // 4, pix.height // 2), (255, 255, 255))
+
+    def test_image_pdf_applies_exif_orientation(self):
+        image = self.root / 'rotated.jpg'
+        source = Image.new('RGB', (20, 10), 'red')
+        exif = Image.Exif()
+        exif[274] = 6
+        source.save(image, exif=exif)
+        output = self.root / 'rotated.pdf'
+        images_to_pdf([image], output)
+        with fitz.open(output) as doc:
+            self.assertGreater(doc[0].rect.height, doc[0].rect.width)
+
     def test_sanitize(self):
         self.pdf.doc.set_metadata({'author': 'Private'})
         self.pdf.doc.embfile_add('secret.txt', b'secret')
@@ -129,4 +159,3 @@ class PDFTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

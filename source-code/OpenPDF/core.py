@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 import fitz
-from PIL import Image
+from PIL import Image, ImageOps
 from text_tools import find_matches, replace_match, select_text
 from rich_boxes import apply_redactions
 
@@ -177,8 +177,10 @@ class PDF:
 
     def number_pages(self):
         for i, page in enumerate(self.doc):
-            page.insert_text((page.rect.width / 2, page.rect.height - 20),
-                             f'{i + 1} / {len(self.doc)}', fontsize=10)
+            text = f'{i + 1} / {len(self.doc)}'
+            width = fitz.get_text_length(text, fontname='helv', fontsize=10)
+            point = fitz.Point((page.rect.width - width) / 2, page.rect.height - 20) * page.derotation_matrix
+            page.insert_text(point, text, fontsize=10)
 
     def export_images(self, folder, dpi=144):
         for i, page in enumerate(self.doc):
@@ -263,7 +265,8 @@ def images_to_pdf(paths, output):
     try:
         for path in paths:
             with Image.open(path) as image:
-                image = image.convert('RGB')
+                image = ImageOps.exif_transpose(image)
+                image = Image.alpha_composite(Image.new('RGBA', image.size, 'white'), image.convert('RGBA')).convert('RGB')
                 data = io.BytesIO()
                 image.save(data, format='PNG')
                 w, h = image.size
@@ -292,4 +295,3 @@ def office_to_pdf(path, folder):
     if result.returncode or not output.exists():
         raise ValueError(result.stderr or result.stdout or 'Conversion failed.')
     return output
-
