@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 import fitz
-from PIL import Image
+from PIL import Image, ImageOps
 from text_tools import find_matches, replace_match, select_text
 from rich_boxes import apply_redactions
 
@@ -263,7 +263,7 @@ def images_to_pdf(paths, output):
     try:
         for path in paths:
             with Image.open(path) as image:
-                image = image.convert('RGB')
+                image = ImageOps.exif_transpose(image).convert('RGB')
                 data = io.BytesIO()
                 image.save(data, format='PNG')
                 w, h = image.size
