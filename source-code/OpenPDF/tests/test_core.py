@@ -24,6 +24,11 @@ class PDFTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 page_numbers(spec, 3)
 
+    def test_page_numbers_always_gives_user_message(self):
+        for spec in ('-1', 'abc', 'page-2', '3-abc', '1-'):
+            with self.assertRaisesRegex(ValueError, 'Enter pages between 1 and'):
+                page_numbers(spec, 5)
+
     def test_merge_select_split(self):
         source = self.root / 'source.pdf'
         self.pdf.save(source)
