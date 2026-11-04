@@ -103,6 +103,8 @@ def layout(box, check_height=True, with_height=False):
             continue
         if char['width'] > width + .01:
             raise ValueError('The box is narrower than a letter. Widen it or reduce the font size.')
+        if char['char'].isspace() and used + char['width'] > width + .01:
+            continue
         while row and used + char['width'] > width + .01:
             split = next((i + 1 for i in range(len(row) - 1, -1, -1) if row[i]['char'].isspace()), len(row))
             rows.append((row[:split], row[0]))
