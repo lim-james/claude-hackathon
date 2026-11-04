@@ -162,7 +162,8 @@ class PDF:
         for w in self.doc[index].widgets() or []:
             if w.field_name == name:
                 if w.field_type == fitz.PDF_WIDGET_TYPE_CHECKBOX:
-                    w.field_value = w.on_state() if value.lower() in ('yes', 'true', '1', 'on') else 'Off'
+                    on_state = w.on_state()
+                    w.field_value = on_state if value == on_state or value.lower() in ('yes', 'true', '1', 'on') else 'Off'
                 elif w.field_type == fitz.PDF_WIDGET_TYPE_TEXT:
                     w.field_value = value
                 else:
