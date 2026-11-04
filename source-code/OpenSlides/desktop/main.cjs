@@ -77,7 +77,7 @@ app.whenReady().then(async()=>{
     await require('../../main/desktop/suite.cjs').startSuite({openSlides:createWindow,getSlidesWindow:()=>mainWindow});
   }else{
     await createWindow();
-    app.on('activate',()=>{if(BrowserWindow.getAllWindows().length===0)void createWindow();});
+    app.on('activate',()=>{void createWindow();});
   }
 });
 app.on('window-all-closed',()=>{if(process.platform!=='darwin')app.quit();});
