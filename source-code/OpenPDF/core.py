@@ -263,7 +263,7 @@ def images_to_pdf(paths, output):
     try:
         for path in paths:
             with Image.open(path) as image:
-                image = image.convert('RGB')
+                image = Image.alpha_composite(Image.new('RGBA', image.size, 'white'), image.convert('RGBA')).convert('RGB')
                 data = io.BytesIO()
                 image.save(data, format='PNG')
                 w, h = image.size
@@ -292,4 +292,3 @@ def office_to_pdf(path, folder):
     if result.returncode or not output.exists():
         raise ValueError(result.stderr or result.stdout or 'Conversion failed.')
     return output
-
