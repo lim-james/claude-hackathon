@@ -177,8 +177,9 @@ class PDF:
 
     def number_pages(self):
         for i, page in enumerate(self.doc):
-            page.insert_text((page.rect.width / 2, page.rect.height - 20),
-                             f'{i + 1} / {len(self.doc)}', fontsize=10)
+            origin = fitz.Point(page.rect.width / 2, page.rect.height - 20) * page.derotation_matrix
+            page.insert_text(origin, f'{i + 1} / {len(self.doc)}', fontsize=10,
+                             rotate=page.rotation)
 
     def export_images(self, folder, dpi=144):
         for i, page in enumerate(self.doc):
@@ -292,4 +293,3 @@ def office_to_pdf(path, folder):
     if result.returncode or not output.exists():
         raise ValueError(result.stderr or result.stdout or 'Conversion failed.')
     return output
-
