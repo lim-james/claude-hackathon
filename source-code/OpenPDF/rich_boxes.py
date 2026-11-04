@@ -103,6 +103,8 @@ def layout(box, check_height=True, with_height=False):
             continue
         if char['width'] > width + .01:
             raise ValueError('The box is narrower than a letter. Widen it or reduce the font size.')
+        if char['char'].isspace() and used + char['width'] > width + .01:
+            continue
         while row and used + char['width'] > width + .01:
             split = next((i + 1 for i in range(len(row) - 1, -1, -1) if row[i]['char'].isspace()), len(row))
             rows.append((row[:split], row[0]))
@@ -118,7 +120,7 @@ def layout(box, check_height=True, with_height=False):
         desc = max((c['descent'] for c in row), default=fallback['descent'])
         if check_height and y + asc + desc > rect.height - 4 + .01:
             raise ValueError('Text needs more height. Enlarge the box or reduce the font size; no text was discarded.')
-        row_width = sum(c['width'] for c in row)
+        row_width = sum(c['width'] for c in row[:max((i + 1 for i, c in enumerate(row) if not c['char'].isspace()), default=0)])
         x = 4 + (width - row_width) * {'left': 0, 'center': .5, 'right': 1}[box['align']]
         for c in row:
             placed.append((x, y + asc, c))

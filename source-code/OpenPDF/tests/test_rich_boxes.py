@@ -4,7 +4,7 @@ import fitz
 from core import PDF
 from box_tools import text_sections, edit_section
 from text_tools import find_matches, replace_match
-from rich_boxes import new_box, put_box, boxes, delete_box, move_page, apply_redactions, DEFAULT_STYLE, fit_box
+from rich_boxes import new_box, put_box, boxes, delete_box, move_page, apply_redactions, DEFAULT_STYLE, fit_box, layout, metric_font
 
 
 class RichBoxTests(unittest.TestCase):
@@ -126,6 +126,27 @@ class RichBoxTests(unittest.TestCase):
         fitted, _ = fit_box(self.box, self.pdf.doc[0].rect)
         again, _ = fit_box(fitted, self.pdf.doc[0].rect)
         self.assertEqual(fitted, again)
+
+    def test_space_after_a_full_line_does_not_start_a_blank_row(self):
+        word = metric_font('helv').text_length('hello', fontsize=DEFAULT_STYLE['size'])
+        box = dict(new_box((0, 0, word + 8, 200)), runs=[dict(text='hello hello', style={})])
+        rows = {}
+        for _, y, char in layout(box):
+            rows.setdefault(y, []).append(char['char'])
+        self.assertEqual([''.join(row).strip() for row in rows.values()], ['hello', 'hello'])
+
+    def test_trailing_space_of_a_wrapped_row_does_not_offset_alignment(self):
+        font = metric_font('helv')
+        size = DEFAULT_STYLE['size']
+        width = font.text_length('hello ', fontsize=size) + 1
+        box = dict(new_box((0, 0, width + 8, 200)), runs=[dict(text='hello hello', style={})], align='right')
+        edges = {}
+        for x, y, char in layout(box):
+            if not char['char'].isspace():
+                edges[y] = x + char['width']
+        self.assertEqual(len(edges), 2)
+        for edge in edges.values():
+            self.assertAlmostEqual(edge, width + 4)
 
 
 if __name__ == '__main__':
