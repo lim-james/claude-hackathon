@@ -177,8 +177,10 @@ class PDF:
 
     def number_pages(self):
         for i, page in enumerate(self.doc):
-            page.insert_text((page.rect.width / 2, page.rect.height - 20),
-                             f'{i + 1} / {len(self.doc)}', fontsize=10)
+            text = f'{i + 1} / {len(self.doc)}'
+            width = fitz.get_text_length(text, fontname='helv', fontsize=10)
+            point = fitz.Point((page.rect.width - width) / 2, page.rect.height - 20) * page.derotation_matrix
+            page.insert_text(point, text, fontsize=10)
 
     def export_images(self, folder, dpi=144):
         for i, page in enumerate(self.doc):
