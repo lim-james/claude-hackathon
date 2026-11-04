@@ -44,7 +44,7 @@ def remove_layer(page, section):
     identifier = section.get('_layer_id')
     if not identifier:
         return False
-    matches = {s['_stream'] for s in layers(page) if s['_layer_id'] == identifier}
+    matches = {s['_stream'] for s in layers(page) if s.get('_layer_id') == identifier}
     if not matches:
         raise ValueError('This text section changed. Select it again.')
     set_contents(page, [r for r in page.get_contents() if r not in matches])
