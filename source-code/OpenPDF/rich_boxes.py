@@ -120,7 +120,7 @@ def layout(box, check_height=True, with_height=False):
         desc = max((c['descent'] for c in row), default=fallback['descent'])
         if check_height and y + asc + desc > rect.height - 4 + .01:
             raise ValueError('Text needs more height. Enlarge the box or reduce the font size; no text was discarded.')
-        row_width = sum(c['width'] for c in row)
+        row_width = sum(c['width'] for c in row[:max((i + 1 for i, c in enumerate(row) if not c['char'].isspace()), default=0)])
         x = 4 + (width - row_width) * {'left': 0, 'center': .5, 'right': 1}[box['align']]
         for c in row:
             placed.append((x, y + asc, c))

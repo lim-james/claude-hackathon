@@ -135,6 +135,19 @@ class RichBoxTests(unittest.TestCase):
             rows.setdefault(y, []).append(char['char'])
         self.assertEqual([''.join(row).strip() for row in rows.values()], ['hello', 'hello'])
 
+    def test_trailing_space_of_a_wrapped_row_does_not_offset_alignment(self):
+        font = metric_font('helv')
+        size = DEFAULT_STYLE['size']
+        width = font.text_length('hello ', fontsize=size) + 1
+        box = dict(new_box((0, 0, width + 8, 200)), runs=[dict(text='hello hello', style={})], align='right')
+        edges = {}
+        for x, y, char in layout(box):
+            if not char['char'].isspace():
+                edges[y] = x + char['width']
+        self.assertEqual(len(edges), 2)
+        for edge in edges.values():
+            self.assertAlmostEqual(edge, width + 4)
+
 
 if __name__ == '__main__':
     unittest.main()
