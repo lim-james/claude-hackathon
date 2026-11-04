@@ -100,6 +100,17 @@ class PDFTests(unittest.TestCase):
         with fitz.open(self.root / 'image.pdf') as doc:
             self.assertEqual(len(doc[0].get_images()), 1)
 
+    def test_transparent_image_background_is_white_in_pdf(self):
+        image = self.root / 'transparent.png'
+        source = Image.new('RGBA', (20, 10), (0, 0, 0, 0))
+        source.paste((255, 0, 0, 255), (0, 0, 10, 10))
+        source.save(image)
+        output = self.root / 'transparent.pdf'
+        images_to_pdf([image], output)
+        with fitz.open(output) as doc:
+            pix = doc[0].get_pixmap()
+            self.assertEqual(pix.pixel(pix.width * 3 // 4, pix.height // 2), (255, 255, 255))
+
     def test_sanitize(self):
         self.pdf.doc.set_metadata({'author': 'Private'})
         self.pdf.doc.embfile_add('secret.txt', b'secret')
@@ -129,4 +140,3 @@ class PDFTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
