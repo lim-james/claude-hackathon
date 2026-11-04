@@ -24,6 +24,14 @@ class PDFTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 page_numbers(spec, 3)
 
+    def test_page_number_is_centered_at_bottom_of_rotated_page(self):
+        page = self.pdf.doc[0]
+        page.set_rotation(90)
+        self.pdf.number_pages()
+        displayed = page.search_for('1 / 1')[0] * page.rotation_matrix
+        self.assertAlmostEqual((displayed.x0 + displayed.x1) / 2, page.rect.width / 2, delta=10)
+        self.assertGreater(displayed.y0, page.rect.height - 40)
+
     def test_merge_select_split(self):
         source = self.root / 'source.pdf'
         self.pdf.save(source)
