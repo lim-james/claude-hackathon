@@ -16,6 +16,7 @@ from rich_boxes import apply_redactions
 
 
 def page_numbers(spec, count):
+    error = ValueError(f'Enter pages between 1 and {count}, e.g. 1,3-5.')
     result = []
     for part in spec.split(','):
         part = part.strip()
@@ -23,11 +24,13 @@ def page_numbers(spec, count):
             continue
         if '-' in part:
             a, b = map(int, part.split('-', 1))
+            if max(a, b) > count:
+                raise error
             result.extend(range(a - 1, b, 1) if a <= b else range(a - 1, b - 2, -1))
         else:
             result.append(int(part) - 1)
     if not result or any(p < 0 or p >= count for p in result):
-        raise ValueError(f'Enter pages between 1 and {count}, e.g. 1,3-5.')
+        raise error
     return result
 
 
