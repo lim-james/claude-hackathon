@@ -4,7 +4,7 @@ import fitz
 from core import PDF
 from box_tools import text_sections, edit_section
 from text_tools import find_matches, replace_match
-from rich_boxes import new_box, put_box, boxes, delete_box, move_page, apply_redactions, DEFAULT_STYLE, fit_box
+from rich_boxes import new_box, put_box, boxes, delete_box, move_page, apply_redactions, DEFAULT_STYLE, fit_box, layout, metric_font
 
 
 class RichBoxTests(unittest.TestCase):
@@ -126,6 +126,14 @@ class RichBoxTests(unittest.TestCase):
         fitted, _ = fit_box(self.box, self.pdf.doc[0].rect)
         again, _ = fit_box(fitted, self.pdf.doc[0].rect)
         self.assertEqual(fitted, again)
+
+    def test_space_after_a_full_line_does_not_start_a_blank_row(self):
+        word = metric_font('helv').text_length('hello', fontsize=DEFAULT_STYLE['size'])
+        box = dict(new_box((0, 0, word + 8, 200)), runs=[dict(text='hello hello', style={})])
+        rows = {}
+        for _, y, char in layout(box):
+            rows.setdefault(y, []).append(char['char'])
+        self.assertEqual([''.join(row).strip() for row in rows.values()], ['hello', 'hello'])
 
 
 if __name__ == '__main__':
