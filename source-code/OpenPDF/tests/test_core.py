@@ -24,6 +24,10 @@ class PDFTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 page_numbers(spec, 3)
 
+    def test_page_range_past_the_end_is_rejected_without_expanding(self):
+        with self.assertRaises(ValueError):
+            page_numbers('1-' + '9' * 20, 3)
+
     def test_merge_select_split(self):
         source = self.root / 'source.pdf'
         self.pdf.save(source)
