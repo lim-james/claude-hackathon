@@ -17,7 +17,7 @@ async function callAnthropic(key, body, version, signal, fetchImpl = fetch) {
   let text=''; const reader=response.body?.getReader();
   if (reader) {
     const decoder=new TextDecoder();let bytes=0;
-    while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.length;if(bytes>1_000_000){await reader.cancel();throw new Error('Claudia response is too large.');}text+=decoder.decode(value,{stream:true});}
+    while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.length;if(bytes>1_000_000){await reader.cancel();throw new Error('Claude response is too large.');}text+=decoder.decode(value,{stream:true});}
     text+=decoder.decode();
   }
   let data;try{data=JSON.parse(text.split(key).join('[redacted]'));}catch{data={};}
