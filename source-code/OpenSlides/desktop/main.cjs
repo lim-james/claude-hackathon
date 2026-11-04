@@ -70,7 +70,7 @@ app.whenReady().then(async()=>{
     if(pending.size)throw new Error('Another request is already running. Cancel it or wait.');
     const controller=new AbortController();pending.set(id,controller);
     const timeout=setTimeout(()=>controller.abort(),180000);
-    try{return await callAnthropic(apiKey,body,version,controller.signal);}catch(error){return {ok:false,status:0,data:null,error:controller.signal.aborted?'Request cancelled or timed out.':'Could not complete the Anthropic request. Check your connection and settings.'};}finally{clearTimeout(timeout);pending.delete(id);}
+    try{return await callAnthropic(apiKey,body,version,controller.signal);}catch(error){return {ok:false,status:0,data:null,error:controller.signal.aborted?'Request cancelled or timed out.':'Could not complete the Anthropic request. Check your connection and settings.'};}finally{clearTimeout(timeout);if(pending.get(id)===controller)pending.delete(id);}
   });
   ipcMain.handle('ai:cancel',(event,id)=>{trusted(event);pending.get(id)?.abort();});
   if(suiteMode){
