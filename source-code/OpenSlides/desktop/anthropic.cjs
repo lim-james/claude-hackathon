@@ -6,7 +6,7 @@ function validateRequest(body, version) {
   if (typeof body.model !== 'string' || !/^[a-zA-Z0-9._:-]{1,100}$/.test(body.model)) throw new Error('Invalid model ID.');
   if (!Number.isInteger(body.max_tokens) || body.max_tokens < 128 || body.max_tokens > 16384) throw new Error('Invalid output limit.');
   if (typeof body.system !== 'string' || body.system.length > 20000) throw new Error('Invalid instructions.');
-  if (!Array.isArray(body.messages) || body.messages.length !== 1 || body.messages[0]?.role !== 'user' || typeof body.messages[0]?.content !== 'string' || body.messages[0].content.length > 80000) throw new Error('Invalid design request.');
+  if (!Array.isArray(body.messages) || body.messages.length !== 1 || body.messages[0]?.role !== 'user' || typeof body.messages[0]?.content !== 'string' || !body.messages[0].content.trim() || body.messages[0].content.length > 80000) throw new Error('Invalid design request.');
   // Construct a fresh allowlisted payload; never forward tools, endpoints or arbitrary renderer fields.
   return { model:body.model, max_tokens:body.max_tokens, system:body.system, messages:[{role:'user',content:body.messages[0].content}] };
 }
