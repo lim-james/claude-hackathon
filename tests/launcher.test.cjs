@@ -11,10 +11,11 @@ test('external links are restricted to the suite repository',()=>{
  for(const url of ['file:///C:/Windows/cmd.exe','https://github.com.evil.test/RishabhShenoy03/claude-hackathon','https://github.com/RishabhShenoy03/claude-hackathon-evil','https://user@github.com/RishabhShenoy03/claude-hackathon','https://github.com/other/repo'])assert.equal(allowedExternal(url),false);
 });
 test('protocol serves local assets without path traversal',()=>{
- const root=path.resolve('fixture');
- assert.equal(resolveAsset(root,'/'),path.join(root,'index.html'));
- assert.equal(resolveAsset(root,'/app.js'),path.join(root,'app.js'));
- for(const p of ['/../secret','/%2e%2e/secret','/%ZZ'])assert.equal(resolveAsset(root,p),null);
+  const root=path.resolve('fixture');
+  assert.equal(resolveAsset(root,'/'),path.join(root,'index.html'));
+  assert.equal(resolveAsset(root,''),path.join(root,'index.html'));
+  assert.equal(resolveAsset(root,'/app.js'),path.join(root,'app.js'));
+  for(const p of ['/../secret','/%2e%2e/secret','/%ZZ'])assert.equal(resolveAsset(root,p),null);
 });
 test('suite and standalone register their protocols exactly once before ready',()=>{
  const vm=require('node:vm'),fs=require('node:fs');
