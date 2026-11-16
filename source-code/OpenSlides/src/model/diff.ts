@@ -1,4 +1,4 @@
-import type { Deck, Slide, SlideElement } from './types';
+import type { Asset, Deck, Layout, Slide, SlideElement, Theme } from './types';
 
 export interface SlideDiff {
   id: string;
@@ -8,8 +8,16 @@ export interface SlideDiff {
   changes: string[];
 }
 
+/** A deck-level difference: one row in the compare dialog, e.g. Theme or Slide size. */
+export interface DeckChange {
+  kind: 'properties' | 'slide-size' | 'theme' | 'layouts' | 'images';
+  label: string;
+  changes: string[];
+}
+
 export interface DeckDiff {
   titleChange: { from: string; to: string } | null;
+  deckChanges: DeckChange[];
   slides: SlideDiff[];
   summary: string;
   hasChanges: boolean;
@@ -49,6 +57,15 @@ function describeChange(prev: SlideElement, next: SlideElement): string {
   return `${label(next.type)} changed`;
 }
 
+/** True when the items present on both sides appear in a different order. */
+function orderChanged(from: { id: string }[], to: { id: string }[]): boolean {
+  const inFrom = new Set(from.map((x) => x.id));
+  const inTo = new Set(to.map((x) => x.id));
+  const a = from.filter((x) => inTo.has(x.id));
+  const b = to.filter((x) => inFrom.has(x.id));
+  return a.some((x, i) => x.id !== b[i]?.id);
+}
+
 function slideChanges(from: Slide, to: Slide): string[] {
   const changes: string[] = [];
   const fromEls = new Map(from.elements.map((e) => [e.id, e]));
@@ -59,6 +76,7 @@ function slideChanges(from: Slide, to: Slide): string[] {
     const prev = fromEls.get(e.id);
     if (prev && !equal(prev, e)) changes.push(describeChange(prev, e));
   }
+  if (orderChanged(from.elements, to.elements)) changes.push('Element order (front to back) changed');
   if ((from.notes || '') !== (to.notes || '')) changes.push('Notes changed');
   if (from.layoutId !== to.layoutId) changes.push('Layout changed');
   if (!equal(from.background, to.background)) changes.push('Background changed');
@@ -66,6 +84,68 @@ function slideChanges(from: Slide, to: Slide): string[] {
   if ((from.hidden ?? false) !== (to.hidden ?? false)) changes.push(to.hidden ? 'Slide hidden' : 'Slide shown');
   return changes;
 }
+
+function themeChanges(from: Theme | undefined, to: Theme | undefined): string[] {
+  if (equal(from, to)) return [];
+  const changes: string[] = [];
+  if (!equal(from?.colors, to?.colors)) changes.push('Colours changed');
+  for (const font of ['heading', 'body'] as const) {
+    const before = from?.fonts?.[font];
+    const after = to?.fonts?.[font];
+    if (before !== after) changes.push(`${font === 'heading' ? 'Heading' : 'Body'} font: ${before ?? 'none'} → ${after ?? 'none'}`);
+  }
+  if (from?.logoAssetId !== to?.logoAssetId) changes.push('Logo changed');
+  return changes.length ? changes : ['Theme changed'];
+}
+
+function layoutChanges(from: Layout[] = [], to: Layout[] = []): string[] {
+  const changes: string[] = [];
+  const fromById = new Map(from.map((l) => [l.id, l]));
+  const toIds = new Set(to.map((l) => l.id));
+  for (const l of to) {
+    const prev = fromById.get(l.id);
+    if (!prev) changes.push(`“${l.name}” added`);
+    else if (!equal(prev, l)) changes.push(`“${l.name}” changed`);
+  }
+  for (const l of from) if (!toIds.has(l.id)) changes.push(`“${l.name}” removed`);
+  if (orderChanged(from, to)) changes.push('Layout order changed');
+  return changes;
+}
+
+// Image data is compared as strings, never serialised: data URLs run to megabytes.
+function assetChanges(from: Record<string, Asset> = {}, to: Record<string, Asset> = {}): string[] {
+  let added = 0;
+  let removed = 0;
+  let changed = 0;
+  for (const id of Object.keys(to)) {
+    const a = from[id];
+    const b = to[id];
+    if (!a) added++;
+    else if (a.dataUrl !== b.dataUrl || a.w !== b.w || a.h !== b.h || a.name !== b.name) changed++;
+  }
+  for (const id of Object.keys(from)) if (!to[id]) removed++;
+  const n = (count: number, what: string) => `${count} image${count === 1 ? '' : 's'} ${what}`;
+  const changes: string[] = [];
+  if (added) changes.push(n(added, 'added'));
+  if (removed) changes.push(n(removed, 'removed'));
+  if (changed) changes.push(n(changed, 'replaced'));
+  return changes;
+}
+
+function deckChanges(from: Deck, to: Deck): DeckChange[] {
+  const rows: DeckChange[] = [];
+  const add = (kind: DeckChange['kind'], label: string, changes: string[]) => {
+    if (changes.length) rows.push({ kind, label, changes });
+  };
+  add('properties', 'Deck properties', from.id !== to.id || from.version !== to.version ? ['Deck id or format version changed'] : []);
+  add('slide-size', 'Slide size', equal(from.size, to.size) ? [] : [`${sizeText(from.size)} → ${sizeText(to.size)}`]);
+  add('theme', 'Theme', themeChanges(from.theme, to.theme));
+  add('layouts', 'Layouts', layoutChanges(from.layouts, to.layouts));
+  add('images', 'Images', assetChanges(from.assets, to.assets));
+  return rows;
+}
+
+const sizeText = (size: Deck['size'] | undefined) => (size ? `${size.w} × ${size.h}` : 'none');
 
 /** Structural diff between two decks: what changed going from `from` to `to`. */
 export function diffDecks(from: Deck, to: Deck): DeckDiff {
@@ -98,7 +178,9 @@ export function diffDecks(from: Deck, to: Deck): DeckDiff {
     if (n) parts.push(`${n} ${s}`);
   }
   const titleChange = from.title !== to.title ? { from: from.title, to: to.title } : null;
-  const hasChanges = !!titleChange || slides.some((s) => s.status !== 'unchanged');
-  const summary = !hasChanges ? 'No changes' : `${parts.join(', ')}${titleChange ? (parts.length ? '; ' : '') + 'title changed' : ''}`;
-  return { titleChange, slides, summary, hasChanges };
+  const deck = deckChanges(from, to);
+  const hasChanges = !!titleChange || deck.length > 0 || slides.some((s) => s.status !== 'unchanged');
+  const deckParts = [...(titleChange ? ['title'] : []), ...deck.map((c) => c.label.toLowerCase())].map((p) => `${p} changed`);
+  const summary = !hasChanges ? 'No changes' : [parts.join(', '), deckParts.join(', ')].filter(Boolean).join('; ');
+  return { titleChange, deckChanges: deck, slides, summary, hasChanges };
 }

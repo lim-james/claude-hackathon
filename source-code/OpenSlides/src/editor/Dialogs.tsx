@@ -101,6 +101,16 @@ function VersionsDialog({ onClose }: { onClose: () => void }) {
               <div className="small">“{diff.titleChange.from}” → “{diff.titleChange.to}”</div>
             </div>
           )}
+          {diff.deckChanges.map((c) => (
+            <div key={c.kind} className="vd-slide">
+              <strong>{c.label}</strong>
+              <ul>
+                {c.changes.map((line, i) => (
+                  <li key={i} className="small">{line}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
           {!diff.hasChanges && <p className="muted small">This version is identical to the current deck.</p>}
           {changed.map((s) => (
             <div key={s.id} className="vd-slide">
