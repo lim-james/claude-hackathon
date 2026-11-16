@@ -264,5 +264,121 @@ class FormFieldTests(unittest.TestCase):
         self.assertIn("'*.xfdf *.xml'", body)
         self.assertNotIn('.fdf ', body.replace('.xfdf', ''))
 
+    # Issue 76: the XFDF specification writes grouped fields as nested <field> elements.
+    ISSUE_76_XFDF = (
+        '<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve"><fields>\n'
+        '<field name="applicant"><field name="name"><value>Ada Lovelace</value></field>'
+        '<field name="city"><value>London</value></field></field>\n'
+        '<field name="employer"><field name="name"><value>Analytical Engines Ltd</value></field>'
+        '<field name="city"><value>Turin</value></field></field>\n'
+        '</fields></xfdf>')
+    ISSUE_76_VALUES = {'applicant.name': 'Ada Lovelace', 'applicant.city': 'London',
+                       'employer.name': 'Analytical Engines Ltd', 'employer.city': 'Turin'}
+
+    def add_grouped(self, pdf, fields):
+        # Fields grouped under parent fields (applicant.name is "name" inside "applicant"),
+        # as form designers write them and add_field cannot.
+        doc, groups, top = pdf.doc, {}, []
+        for number, (full_name, kind, choices) in enumerate(fields):
+            pdf.add_field(0, fitz.Rect(50, 20 + 30 * number, 250, 40 + 30 * number), f'field{number}', kind, choices)
+            child = next(w.xref for w in doc[0].widgets() if w.field_name == f'field{number}')
+            parts = full_name.split('.')
+            doc.xref_set_key(child, 'T', fitz.get_pdf_str(parts[-1]))
+            for depth in range(len(parts) - 1, 0, -1):
+                known = tuple(parts[:depth]) in groups
+                if not known:
+                    groups[tuple(parts[:depth])] = doc.get_new_xref()
+                    doc.update_object(groups[tuple(parts[:depth])], f'<< /T {fitz.get_pdf_str(parts[depth - 1])} /Kids [] >>')
+                parent = groups[tuple(parts[:depth])]
+                doc.xref_set_key(parent, 'Kids', doc.xref_get_key(parent, 'Kids')[1][:-1] + f' {child} 0 R]')
+                doc.xref_set_key(child, 'Parent', f'{parent} 0 R')
+                if known:
+                    break
+                child = parent
+            else:
+                top.append(child)
+        doc.xref_set_key(doc.pdf_catalog(), 'AcroForm/Fields', '[' + ' '.join(f'{xref} 0 R' for xref in top) + ']')
+        pdf.restore(pdf.bytes())
+
+    def add_issue_76_form(self, pdf):
+        self.add_grouped(pdf, [(name, 'text', None) for name in self.ISSUE_76_VALUES])
+
+    def test_import_fills_grouped_fields_from_nested_xfdf(self):
+        self.add_issue_76_form(self.pdf)
+        self.assertEqual(self.values(self.pdf), dict.fromkeys(self.ISSUE_76_VALUES, ''))
+        for xfdf in (self.ISSUE_76_XFDF, self.ISSUE_76_XFDF.replace(' xmlns="http://ns.adobe.com/xfdf/"', '')):
+            with self.subTest(namespaced='xmlns=' in xfdf):
+                for name in self.ISSUE_76_VALUES:
+                    self.pdf.fill_field(0, name, '')
+                self.assertEqual(self.import_text(self.pdf, xfdf), 4)
+                self.assertEqual(self.values(self.pdf), self.ISSUE_76_VALUES)
+        self.pdf.restore(self.pdf.doc.tobytes(garbage=4))
+        self.assertEqual(self.values(self.pdf), self.ISSUE_76_VALUES)
+
+    def test_nested_xfdf_does_not_fill_ungrouped_fields_that_share_a_leaf_name(self):
+        # It used to give "name" and "city" the employer's values; a group holds no value of its own.
+        for number, name in enumerate(('name', 'city', 'applicant')):
+            self.pdf.add_field(0, fitz.Rect(50, 50 + 40 * number, 250, 80 + 40 * number), name, 'text')
+        self.pdf.fill_field(0, 'applicant', 'unchanged')
+        self.assertEqual(self.import_text(self.pdf, self.ISSUE_76_XFDF), 0)
+        self.assertEqual(self.values(self.pdf), {'name': '', 'city': '', 'applicant': 'unchanged'})
+
+    def test_flat_dotted_xfdf_still_fills_grouped_fields(self):
+        self.add_issue_76_form(self.pdf)
+        flat = '<xfdf><fields>{}</fields></xfdf>'.format(''.join(
+            f'<field name="{name}"><value>{value}</value></field>' for name, value in self.ISSUE_76_VALUES.items()))
+        self.assertEqual(self.import_text(self.pdf, flat), 4)
+        self.assertEqual(self.values(self.pdf), self.ISSUE_76_VALUES)
+
+    def test_import_joins_three_levels_of_nested_names(self):
+        self.add_grouped(self.pdf, [('a.b.c', 'text', None), ('a.b.d', 'text', None), ('a.e', 'text', None)])
+        xfdf = ('<xfdf><fields><field name="a"><field name="b"><field name="c"><value>deep</value></field>'
+                '<field name="d"><value>also deep</value></field></field>'
+                '<field name="e"><value>middle</value></field></field></fields></xfdf>')
+        self.assertEqual(self.import_text(self.pdf, xfdf), 3)
+        self.assertEqual(self.values(self.pdf), {'a.b.c': 'deep', 'a.b.d': 'also deep', 'a.e': 'middle'})
+
+    def test_export_nests_grouped_fields_and_import_reproduces_every_value(self):
+        import xml.etree.ElementTree as ET
+        self.add_grouped(self.pdf, [(name, 'text', None) for name in self.ISSUE_76_VALUES] + [('a.b.c', 'text', None)])
+        self.pdf.add_field(0, fitz.Rect(50, 300, 250, 330), 'plain', 'text')
+        self.pdf.add_field(0, fitz.Rect(50, 340, 250, 370), 'x.y', 'text')  # ungrouped, with a dot in its own name
+        self.pdf.add_field(0, fitz.Rect(50, 380, 250, 410), 'odd..name', 'text')
+        filled = dict(self.ISSUE_76_VALUES, **{'a.b.c': 'deep', 'plain': 'flat', 'x.y': 'dotted', 'odd..name': 'odd'})
+        for name, value in filled.items():
+            self.pdf.fill_field(0, name, value)
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder) / 'answers.xfdf'
+            self.assertEqual(self.pdf.export_form_data(data), 8)
+            ns = {'x': 'http://ns.adobe.com/xfdf/'}
+            fields = ET.parse(data).getroot().find('x:fields', ns)
+            self.assertEqual([f.get('name') for f in fields.findall('x:field', ns)],
+                             ['applicant', 'employer', 'a', 'plain', 'x', 'odd..name'])  # one element per group
+            applicant = fields.find('x:field[@name="applicant"]', ns)
+            self.assertIsNone(applicant.find('x:value', ns))
+            self.assertEqual({f.get('name'): f.find('x:value', ns).text for f in applicant.findall('x:field', ns)},
+                             {'name': 'Ada Lovelace', 'city': 'London'})
+            self.assertEqual(fields.find('x:field[@name="a"]/x:field[@name="b"]/x:field[@name="c"]/x:value', ns).text, 'deep')
+            for name in filled:
+                self.pdf.fill_field(0, name, 'something else')
+            refused = []
+            self.assertEqual(self.pdf.import_form_data(data, refused), 8)
+        self.assertEqual((self.values(self.pdf), refused), (filled, []))
+
+    def test_nested_import_follows_the_checkbox_and_dropdown_rules(self):
+        self.add_grouped(self.pdf, [('consent.agree', 'checkbox', None), ('consent.news', 'checkbox', None),
+                                    ('order.plan', 'dropdown', ['Basic', 'Pro']), ('order.size', 'dropdown', ['S', 'L'])])
+        self.pdf.fill_field(0, 'consent.news', 'yes')
+        xfdf = ('<xfdf><fields><field name="consent"><field name="agree"><value>yes</value></field>'
+                '<field name="news"><value>No</value></field></field>'
+                '<field name="order"><field name="plan"><value>Enterprise</value></field>'
+                '<field name="size"><value>L</value></field></field></fields></xfdf>')
+        refused = []
+        self.assertEqual(self.import_text(self.pdf, xfdf, refused), 3)
+        values = self.values(self.pdf)
+        self.assertNotEqual(values.pop('consent.agree'), 'Off')
+        self.assertEqual(values, {'consent.news': 'Off', 'order.plan': 'Basic', 'order.size': 'L'})
+        self.assertEqual(refused, [('order.plan', "'Enterprise' is not one of: Basic, Pro")])
+
 if __name__ == '__main__':
     unittest.main()

@@ -361,12 +361,23 @@ class PDF:
         root = ET.Element(f'{{{ns}}}xfdf')
         container = ET.SubElement(root, f'{{{ns}}}fields')
         count = 0
+        groups = {}  # the <field> element of each group of fields, by the names leading to it
         for page in self.doc:
             for w in (page.widgets() or []):
                 if w.field_type == fitz.PDF_WIDGET_TYPE_SIGNATURE:
                     continue
-                field = ET.SubElement(container, f'{{{ns}}}field')
-                field.set('name', w.field_name)
+                # XFDF nests grouped fields: applicant.name is a "name" field inside an "applicant" field.
+                parts = tuple(w.field_name.split('.'))
+                if not all(parts):  # a name with an empty part cannot be split into nested names
+                    parts = (w.field_name,)
+                parent = container
+                for depth in range(1, len(parts)):
+                    if parts[:depth] not in groups:
+                        groups[parts[:depth]] = ET.SubElement(parent, f'{{{ns}}}field')
+                        groups[parts[:depth]].set('name', parts[depth - 1])
+                    parent = groups[parts[:depth]]
+                field = ET.SubElement(parent, f'{{{ns}}}field')
+                field.set('name', parts[-1])
                 value = ET.SubElement(field, f'{{{ns}}}value')
                 value.text = '' if w.field_value is None else str(w.field_value)
                 count += 1
@@ -387,11 +398,19 @@ class PDF:
         # and an XFDF with no fields (an empty form's export) is still XFDF.
         if local(tree.getroot().tag) != 'xfdf':
             raise ValueError('This is not an XFDF file.')
+        # XFDF writes a grouped field (applicant.name) as nested <field> elements, each holding its
+        # partial name, so a field's full name is its ancestors' names and its own joined with dots.
+        # A <field> with no <value> (a group) sets nothing.
         values = {}
-        for element in tree.iter():
+        pending = [(tree.getroot(), '')]
+        while pending:  # document order, so a later entry for the same name wins
+            element, prefix = pending.pop()
             if local(element.tag) == 'field' and element.get('name'):
+                prefix = f'{prefix}.{element.get("name")}' if prefix else element.get('name')
                 value_el = next((c for c in element if local(c.tag) == 'value'), None)
-                values[element.get('name')] = (value_el.text or '') if value_el is not None else ''
+                if value_el is not None:
+                    values[prefix] = value_el.text or ''
+            pending.extend((child, prefix) for child in reversed(element))
         applied = 0
         for page in self.doc:
             for w in (page.widgets() or []):
