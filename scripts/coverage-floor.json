@@ -1,0 +1,8 @@
+{
+  "tolerance": 0.05,
+  "floors": {
+    "OpenPDF": 22.9,
+    "OpenSlides": 1.7,
+    "Launcher": 6.3
+  }
+}

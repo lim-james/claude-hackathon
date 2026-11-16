@@ -226,6 +226,11 @@ jobs:
         working-directory: source-code/OpenSlides
         timeout-minutes: 3
         run: xvfb-run -a release/linux-unpacked/openslides --smoke-test
+      # Line coverage per area, checked against scripts/coverage-floor.json.
+      - name: Test coverage floor
+        run: |
+          python -m pip install --quiet coverage==7.17.3
+          node scripts/coverage.mjs
       - name: Build combined OpenSuite
         run: npm run build:desktop
       - name: Check suite and both bundled editors
