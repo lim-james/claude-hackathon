@@ -139,11 +139,15 @@ class PDF:
         self.doc.select(page_numbers(spec, len(self.doc)))
 
     def split(self, folder):
+        # Copying a page into a new file can empty the source's form field table
+        # (PyMuPDF insert_pdf, when the table is an indirect object, as it is after
+        # Merge). Later pages then lose their fields and the open document stops
+        # being a form, so each page is copied from its own throwaway source.
+        data = self.bytes()
         for index in range(len(self.doc)):
-            out = fitz.open()
-            out.insert_pdf(self.doc, from_page=index, to_page=index)
-            out.save(str(Path(folder) / f'page-{index + 1:04d}.pdf'))
-            out.close()
+            with fitz.open(stream=data, filetype='pdf') as source, fitz.open() as out:
+                out.insert_pdf(source, from_page=index, to_page=index)
+                out.save(str(Path(folder) / f'page-{index + 1:04d}.pdf'))
 
     def insert_text(self, index, rect, text, size=12):
         page = self.doc[index]

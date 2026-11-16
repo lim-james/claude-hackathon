@@ -33,6 +33,74 @@ class PDFTests(unittest.TestCase):
         self.pdf.split(self.root)
         self.assertEqual(len(list(self.root.glob('page-*.pdf'))), 3)
 
+    def test_split_keeps_form_fields_of_merged_pages(self):
+        form = PDF()
+        form.doc.new_page().insert_text((72, 60), 'Application')
+        form.add_field(0, fitz.Rect(72, 80, 300, 100), 'name')
+        form.add_field(0, fitz.Rect(72, 120, 92, 140), 'agree', 'checkbox')
+        form.add_field(0, fitz.Rect(72, 160, 300, 180), 'colour', 'dropdown', ['Red', 'Blue'])
+        form.fill_field(0, 'name', 'Typed answer')
+        form.fill_field(0, 'agree', 'yes')
+        form.fill_field(0, 'colour', 'Blue')
+        form.note(0, (320, 80), 'Sticky')
+        form.save(self.root / 'form.pdf')
+        form.close()
+        cover = self.root / 'cover.pdf'
+        self.pdf.save(cover)
+        expected = [('name', 'Typed answer'), ('agree', 'Yes'), ('colour', 'Blue')]
+
+        def split_pages(pdf, name):
+            folder = self.root / name
+            folder.mkdir()
+            pdf.split(folder)
+            pages = []
+            for path in sorted(folder.glob('page-*.pdf')):
+                with fitz.open(path) as doc:
+                    page = doc[0]
+                    pages.append(([(w.field_name, w.field_value) for w in page.widgets()],
+                                  page.get_text(),
+                                  [a.info['content'] for a in page.annots()]))
+            return pages
+
+        def check(pages, form_index):
+            self.assertEqual(len(pages), 2)
+            for index, (fields, text, notes) in enumerate(pages):
+                if index == form_index:
+                    self.assertEqual(fields, expected)
+                    self.assertIn('Application', text)
+                    self.assertIn('Typed answer', text)
+                    self.assertEqual(notes, ['Sticky'])
+                else:
+                    self.assertEqual(fields, [])
+                    self.assertIn('public text', text)
+
+        merged = PDF(cover)
+        merged.merge([self.root / 'form.pdf'])
+        merged.save(self.root / 'merged.pdf')
+        check(split_pages(merged, 'after-merge'), 1)
+        # Split must leave the open document as it was: still a form, same answers.
+        self.assertTrue(merged.doc.is_form_pdf)
+        self.assertEqual([(name, value) for _i, name, value, _t, _c in merged.fields()], expected)
+        check(split_pages(merged, 'second-split'), 1)
+        merged.save(self.root / 'after-split.pdf')
+        merged.close()
+        with fitz.open(self.root / 'after-split.pdf') as saved:
+            self.assertTrue(saved.is_form_pdf)
+
+        reopened = PDF(self.root / 'merged.pdf')
+        check(split_pages(reopened, 'reopened'), 1)
+        reopened.close()
+
+        form_first = PDF(self.root / 'form.pdf')
+        form_first.merge([cover])
+        check(split_pages(form_first, 'form-first'), 0)
+        form_first.close()
+
+        alone = PDF(self.root / 'form.pdf')
+        pages = split_pages(alone, 'alone')
+        alone.close()
+        self.assertEqual([fields for fields, _text, _notes in pages], [expected])
+
     def test_redaction_removes_saved_text(self):
         rect = self.pdf.doc[0].search_for('123456')[0]
         self.pdf.redact(0, rect)
