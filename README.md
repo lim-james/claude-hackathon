@@ -200,27 +200,29 @@ Rather than letting an LLM blindly write code or generate un-editable flat image
 
 ## 5. Verification & Testing
 
-Every layer of OpenSuite is validated through automated test suites in continuous integration:
+The checks below run in continuous integration. Each one names the files that do it:
 
-* **OpenPDF Verification**:
+* **OpenPDF Verification** (`source-code/OpenPDF/tests/`):
 
-  * Unit tests validating PDF byte reconstruction, page operations, and form field population.
+  * Unit tests for the PDF engine: page operations (merge, select, split), form fields, annotations, stamps, watermarks, text editing and Word export.
 
-  * True redaction tests ensuring text bytes are purged from the underlying byte stream (not just hidden visually).
+  * A redaction test (`test_core.py`) that saves a redacted file, reopens it, and checks the redacted text is gone from the page text.
 
-  * OCR verification against multi-resolution scanned samples.
+  * One OCR test (`test_core.py`) that draws text on a page, runs OCR on it, and checks the result is searchable. It is skipped when Tesseract is not installed.
 
 * **OpenSlides Verification**:
 
-  * Canvas element state management and drag-and-drop coordinate math tests.
+  * Unit tests (`source-code/OpenSlides/tests/`) for the validation of Ask Claudia proposals, the desktop request proxy to the Claude API, and the version-history diff.
 
-  * Round-trip `.pptx` tests: verifies that generated presentation archives unpack and parse correctly against Open XML schemas without corruption.
+  * A browser smoke check (`source-code/OpenSlides/scripts/browser-smoke.mjs`) that drives the editor in Chromium, exports a deck with `buildPptx`, and checks the `.pptx` archive unpacks with its slide and media files.
 
-  * Automated linter unit tests auditing WCAG contrast ratios and boundary overflows.
+* **Suite Launcher** (`tests/`):
+
+  * Unit tests for the launcher's allowlists (bundled apps, external links, local asset paths) and for the single suite version across manifests.
 
 * **CI/CD & Packaging**:
 
-  * GitHub Actions pipelines execute automated unit test matrices and produce reproducible, automated Windows x64 and Linux x64 binaries.
+  * One GitHub Actions workflow (`.github/workflows/windows.yml`) runs these checks on Node 24 and Python 3.12, then builds the Windows x64 and Linux x64 binaries and launches each with a smoke test.
 
 Check live workflow runs: [GitHub Actions Workflows](https://github.com/lukeai-tan/open-suite/actions)
 
@@ -303,10 +305,27 @@ npm run build:desktop          # output in release/
 
 ### 4. Run Test Suites
 
-```
-npm test
+Run from the repository root, after the install steps above:
 
 ```
+# Suite launcher
+npm test
+
+# OpenSlides
+npm test --prefix source-code/OpenSlides
+
+# OpenPDF (bash/zsh)
+(cd source-code/OpenPDF && python -m unittest discover -s tests)
+```
+
+On Windows, run the OpenPDF tests in two steps:
+
+```
+cd source-code/OpenPDF
+python -m unittest discover -s tests
+```
+
+The OCR test is skipped when Tesseract is not installed.
 
 ## 9. Repository Structure
 
