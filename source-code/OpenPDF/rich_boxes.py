@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from functools import lru_cache
 import json
+import re
 import uuid
 import fitz
 
@@ -217,6 +218,80 @@ def delete_box(doc, index, identifier):
     target = next((b for b in boxes(page) if b['id'] == identifier), None)
     if target:
         contents(page, [x for x in page.get_contents() if x != target['xref']])
+
+
+def _refs(doc, xref, key):
+    """Where an array of references lives (it may be an indirect object) and its xrefs."""
+    kind, value = doc.xref_get_key(xref, key)
+    if kind == 'xref':
+        xref, key = int(value.split()[0]), None
+        value = doc.xref_object(xref, compressed=True)
+    elif kind != 'array':
+        return xref, key, None
+    return xref, key, [int(n) for n in re.findall(r'(\d+) 0 R', value)]
+
+
+def _drop_ref(doc, xref, key, target):
+    """Remove one reference from an array; return how many are left."""
+    owner, owner_key, refs = _refs(doc, xref, key)
+    if refs is None:
+        return 0
+    refs = [x for x in refs if x != target]
+    array = '[' + ' '.join(f'{x} 0 R' for x in refs) + ']'
+    if owner_key is None:
+        doc.update_object(owner, array)
+    else:
+        doc.xref_set_key(owner, owner_key, array)
+    return len(refs)
+
+
+def _drop_empty_field(doc, parent):
+    """A field whose last widget is gone keeps its value on the parent: unlink it."""
+    while parent:
+        if _refs(doc, parent, 'Kids')[2]:
+            return
+        doc.xref_set_key(parent, 'V', 'null')
+        kind, value = doc.xref_get_key(parent, 'Parent')
+        above = int(value.split()[0]) if kind == 'xref' else 0
+        if above:
+            _drop_ref(doc, above, 'Kids', parent)
+        else:
+            form, key = doc.pdf_catalog(), 'AcroForm/Fields'
+            kind, value = doc.xref_get_key(form, 'AcroForm')
+            if kind == 'xref':
+                form, key = int(value.split()[0]), 'Fields'
+            _drop_ref(doc, form, key, parent)
+        parent = above
+
+
+def purge_overlays(page):
+    """Delete form fields and comments under the page's pending redactions.
+
+    MuPDF redaction rewrites the content stream only, so a filled field or a
+    note inside a redacted area would survive the export. Call this before
+    apply_redactions on a user-facing redaction, not when a redact annotation
+    is only a way to delete glyphs for a text edit.
+    """
+    doc = page.parent
+    areas = [a.rect for a in page.annots() or [] if a.type[0] == fitz.PDF_ANNOT_REDACT]
+    inside = lambda rect: any(fitz.Rect(rect).intersects(area) for area in areas)
+    for xref, parent in [(w.xref, doc.xref_get_key(w.xref, 'Parent'))
+                         for w in page.widgets() or [] if inside(w.rect)]:
+        page.delete_widget(page.load_widget(xref))  # also unlinks a field with no parent
+        if parent[0] == 'xref':
+            parent = int(parent[1].split()[0])
+            _drop_ref(doc, parent, 'Kids', xref)
+            _drop_empty_field(doc, parent)
+    notes = [(a.xref, a.irt_xref, a.rect) for a in page.annots() or []
+             if a.type[0] not in (fitz.PDF_ANNOT_REDACT, fitz.PDF_ANNOT_WIDGET)]
+    doomed = {xref for xref, _irt, rect in notes if inside(rect)}
+    while True:  # replies go with the comment they answer
+        replies = {xref for xref, irt, _rect in notes if irt in doomed} - doomed
+        if not replies:
+            break
+        doomed |= replies
+    for xref in doomed:
+        page.delete_annot(page.load_annot(xref))  # takes the popup with it
 
 
 def apply_redactions(page, preserve_native=False, **options):

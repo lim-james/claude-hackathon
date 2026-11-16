@@ -36,7 +36,7 @@ from text_tools import find_matches, replace_match, select_text, lines
 from box_tools import text_sections
 from inline_editor import InlineEditor
 from rich_editor import RichBoxEditor
-from rich_boxes import boxes, new_box, move_page, apply_redactions
+from rich_boxes import boxes, new_box, move_page
 from thumbnails import Thumbnails
 from pen_tools import add_stroke
 from render_tools import PageCache, pixmap_image
@@ -964,13 +964,7 @@ class App(tk.Tk):
         if self.text_quads:
             quads = list(self.text_quads)
             if mb.askyesno('Redact selected text', 'Permanently remove the selected characters in the exported PDF?', parent=self):
-                def remove():
-                    page = self.pdf.doc[self.index]
-                    for quad in quads:
-                        r = quad.rect + (0.05, 0.05, -0.05, -0.05)
-                        page.add_redact_annot(r, fill=(0, 0, 0))
-                    apply_redactions(page, images=0, graphics=0, text=0)
-                self.change(remove, 'Selected text redacted. Save as to export the cleaned PDF.', dirty_pages={self.index})
+                self.change(lambda: self.pdf.redact_quads(self.index, quads), 'Selected text redacted. Save as to export the cleaned PDF.', dirty_pages={self.index})
             return
         rect = self.rect()
         if mb.askyesno('Redact', 'Remove text, image pixels, and intersecting graphics in this area? Save as a new file afterward.', parent=self):

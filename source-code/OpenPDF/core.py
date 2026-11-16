@@ -13,7 +13,7 @@ import tempfile
 import fitz
 from PIL import Image
 from text_tools import find_matches, replace_match, select_text
-from rich_boxes import apply_redactions
+from rich_boxes import apply_redactions, purge_overlays
 
 
 def page_numbers(spec, count):
@@ -174,7 +174,16 @@ class PDF:
     def redact(self, index, rect):
         page = self.doc[index]
         page.add_redact_annot(rect, fill=(0, 0, 0))
+        purge_overlays(page)
         apply_redactions(page, images=2, graphics=2, text=0)
+
+    def redact_quads(self, index, quads):
+        # Selected-text redaction: glyphs only, images and graphics stay.
+        page = self.doc[index]
+        for quad in quads:
+            page.add_redact_annot(quad.rect + (0.05, 0.05, -0.05, -0.05), fill=(0, 0, 0))
+        purge_overlays(page)
+        apply_redactions(page, images=0, graphics=0, text=0)
 
     def sanitize(self):
         self.doc.set_metadata({})
