@@ -1,7 +1,14 @@
 """Character-level selection and style-preserving replacement."""
+import gc
 import io
 import re
+import time
 import hashlib
+from array import array
+from bisect import bisect_right
+from collections import deque
+from itertools import chain, groupby
+from operator import ge, itemgetter
 import fitz
 from rich_boxes import apply_redactions
 
@@ -20,26 +27,189 @@ def lines(page):
     return result
 
 
+_CHAR, _BBOX, _ORIGIN = itemgetter('c'), itemgetter('bbox'), itemgetter('origin')
+
+
+class SearchLine:
+    """One text line packed for searching.
+
+    `lines()` keeps a dictionary per character, far too much to hold for a
+    whole document. This keeps the line's text as one string and the character
+    boxes and origins as flat arrays, and rebuilds the per-character
+    dictionaries only for the characters of a match.
+    """
+    __slots__ = ('text', 'boxes', 'origins', 'starts', 'spans', 'dir')
+
+    def __init__(self, spans, direction):
+        """`spans`: (style, chars) pairs, chars being rawdict character dictionaries."""
+        self.starts, self.spans, self.dir, line = [], [], direction, []
+        for style, chars in spans:
+            if not chars:
+                continue
+            fixed, varying = {'style': style}, []
+            for key in chars[0]:
+                if key not in ('c', 'bbox', 'origin', 'style'):
+                    values = list(map(itemgetter(key), chars))
+                    if values.count(values[0]) == len(values):
+                        fixed[key] = values[0]
+                    else:
+                        varying.append((key, values))
+            self.starts.append(len(line))
+            self.spans.append((fixed, varying))
+            line += chars
+        self.text = ''.join(map(_CHAR, line))
+        self.boxes = array('d', list(chain.from_iterable(map(_BBOX, line))))
+        self.origins = array('d', list(chain.from_iterable(map(_ORIGIN, line))))
+
+    def chars(self, start, end):
+        """The characters start..end as `lines()` would give them."""
+        origins, boxes = iter(self.origins[2 * start:2 * end].tolist()), iter(self.boxes[4 * start:4 * end].tolist())
+        places = zip(zip(origins, origins), zip(boxes, boxes, boxes, boxes), self.text[start:end])
+        span = bisect_right(self.starts, start) - 1
+        fixed, varying = self.spans[span]
+        if not varying and (span + 1 == len(self.starts) or self.starts[span + 1] >= end):
+            return [{'origin': origin, 'bbox': bbox, 'c': c, **fixed} for origin, bbox, c in places]
+        result = []
+        for n, (origin, bbox, c) in enumerate(places, start):
+            while span + 1 < len(self.starts) and self.starts[span + 1] <= n:
+                span += 1
+            fixed, varying = self.spans[span]
+            char = {'origin': origin, 'bbox': bbox, 'c': c, **fixed}
+            for key, values in varying:
+                char[key] = values[n - self.starts[span]]
+            result.append(char)
+        return result
+
+
+def _union(boxes):
+    """Union of character boxes (a flat x0, y0, x1, y1, ... list), as repeated
+    `fitz.Rect |= box` gives it: empty boxes add nothing, an empty union is replaced."""
+    if not (any(map(ge, boxes[0::4], boxes[2::4])) or any(map(ge, boxes[1::4], boxes[3::4]))):
+        return min(boxes[0::4]), min(boxes[1::4]), max(boxes[2::4]), max(boxes[3::4])
+    x0, y0, x1, y1 = boxes[:4]
+    for n in range(4, len(boxes), 4):
+        a, b, c, d = boxes[n:n + 4]
+        if a >= c or b >= d:
+            continue
+        if x0 >= x1 or y0 >= y1:
+            x0, y0, x1, y1 = a, b, c, d
+        else:
+            x0, y0, x1, y1 = min(x0, a), min(y0, b), max(x1, c), max(y1, d)
+    return x0, y0, x1, y1
+
+
+def search_lines(page):
+    """The page's text lines as `SearchLine`s; `lines()` without a dictionary per character."""
+    result = []
+    for block in page.get_text('rawdict')['blocks']:
+        for line in block.get('lines', []):
+            packed = SearchLine((({k: v for k, v in span.items() if k != 'chars'}, span['chars'])
+                                 for span in line['spans']), line['dir'])
+            if packed.text:
+                result.append(packed)
+    return result
+
+
 def find_matches(doc, query, page_indices=None, line_provider=None):
+    """Matches of `query`, page by page. `line_provider(index)` may return a
+    page's lines as `search_lines()` or as `lines()` gives them."""
     if not query:
         return []
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
     matches = []
+    # Extraction and match building allocate a dictionary per character, none
+    # of it cyclic. The collector's passes over it roughly doubled the time to
+    # build 9,200 matches (#43), so it waits until the search returns.
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        _find(doc, pattern, page_indices, line_provider, matches)
+    finally:
+        if collecting:
+            gc.enable()
+    return matches
+
+
+def _find(doc, pattern, page_indices, line_provider, matches):
     for index in (range(len(doc)) if page_indices is None else page_indices):
         page = doc[index]
-        for line in (line_provider(index) if line_provider else lines(page)):
-            text = ''.join(c['c'] for c in line['chars'])
-            for found in re.finditer(re.escape(query), text, re.IGNORECASE):
-                chars = line['chars'][found.start():found.end()]
-                rect = fitz.Rect(chars[0]['bbox'])
-                for char in chars[1:]:
-                    rect |= fitz.Rect(char['bbox'])
-                following = line['chars'][found.end():]
-                limit = next((c['bbox'][0] for c in following if not c['c'].isspace()), page.cropbox.width - 12)
-                matches.append({'page': index, 'rect': tuple(rect), 'text': found.group(),
+        edge = None
+        for line in (line_provider(index) if line_provider else search_lines(page)):
+            if isinstance(line, dict):
+                groups = groupby(line['chars'], key=lambda c: id(c['style']))
+                line = SearchLine(((chars[0]['style'], chars) for chars in (list(g) for _, g in groups)), line['dir'])
+            text, boxes = line.text, line.boxes
+            for found in pattern.finditer(text):
+                start, end = found.span()
+                x0, y0, x1, y1 = _union(boxes[4 * start:4 * end].tolist())
+                following = end
+                while following < len(text) and text[following].isspace():
+                    following += 1
+                if following < len(text):
+                    limit = boxes[4 * following]
+                else:
+                    if edge is None:
+                        edge = page.cropbox.width - 12
+                    limit = edge
+                chars = line.chars(start, end)
+                matches.append({'page': index, 'rect': (x0, y0, x1, y1), 'text': found.group(),
                                 'chars': chars, 'style': chars[0]['style'],
-                                'origin': chars[0]['origin'], 'dir': line['dir'],
-                                'right_limit': max(rect.x1, limit), 'context': text})
-    return matches
+                                'origin': chars[0]['origin'], 'dir': line.dir,
+                                'right_limit': max(x1, limit), 'context': text})
+
+
+class SlicedSearch:
+    """Search page by page in short slices so the caller's event loop stays live.
+
+    `schedule(callback)` queues the next slice (in Tk, an `after` call). Starting
+    or cancelling a search makes slices still queued for an older one do nothing.
+    """
+
+    def __init__(self, schedule, budget=0.05, clock=time.perf_counter):
+        self.schedule, self.budget, self.clock = schedule, budget, clock
+        self.generation = 0
+        self.pending, self.found = deque(), {}
+
+    @property
+    def running(self):
+        return bool(self.pending)
+
+    def start(self, pages, search_page, report):
+        """Search `pages` in the given order. `search_page(index)` returns one
+        page's matches; `report(matches, done)` gets everything found so far,
+        in page order, after each slice."""
+        self.generation += 1
+        generation = self.generation
+        self.pending, self.found = deque(pages), {}
+
+        def tick():
+            if generation != self.generation:
+                return
+            deadline = self.clock() + self.budget
+            while self.pending:
+                index = self.pending.popleft()
+                self.found[index] = search_page(index)
+                if self.clock() >= deadline:
+                    break
+            report([m for index in sorted(self.found) for m in self.found[index]], not self.pending)
+            if self.pending and generation == self.generation:
+                self.schedule(tick)
+        if self.pending:
+            self.schedule(tick)
+        else:
+            report([], True)
+
+    def redo(self, pages):
+        """Search these pages again, next, in the search that is running."""
+        for index in sorted(pages, reverse=True):
+            self.found.pop(index, None)
+            if index in self.pending:
+                self.pending.remove(index)
+            self.pending.appendleft(index)
+
+    def cancel(self):
+        self.generation += 1
+        self.pending, self.found = deque(), {}
 
 
 def select_text(page, start, end, all_lines=None):

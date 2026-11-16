@@ -32,14 +32,14 @@ elif sys.stdout is None or sys.stderr is None:
 import fitz
 from PIL import Image, ImageTk
 from core import PDF, page_numbers, images_to_pdf, office_to_pdf
-from text_tools import find_matches, replace_match, select_text, lines
+from text_tools import find_matches, replace_match, select_text, lines, search_lines, SlicedSearch
 from box_tools import text_sections
 from inline_editor import InlineEditor
 from rich_editor import RichBoxEditor
 from rich_boxes import boxes, new_box, move_page, apply_redactions
 from thumbnails import Thumbnails
 from pen_tools import add_stroke
-from render_tools import PageCache, pixmap_image
+from render_tools import PageCache, TextCache, pixmap_image
 from ui_tools import enable_dpi_awareness
 from studio_ui import build_workspace
 
@@ -61,12 +61,16 @@ class App(tk.Tk):
         self.selection = None
         self.inline = None
         self.view_cache = PageCache()
+        self.search_cache = TextCache()
         self.context_frame = None
         self.selected_text = ''
         self.search_query = ''
         self.search_matches = []
         self.search_position = 0
         self.search_window = None
+        self.search_job = SlicedSearch(lambda tick: self.after(1, tick))
+        self.search_target = 0
+        self.search_report = None
         self.text_quads = []
         self.ink_points = None
         self.ink_color = '#7054d7'
@@ -207,8 +211,43 @@ class App(tk.Tk):
     def text_lines(self, index):
         return self.view_cache.get(self.pdf.doc, 'lines', index, lambda: lines(self.pdf.doc[index]))
 
+    def search_text(self, index):
+        return self.search_cache.get(self.pdf.doc, index, lambda: search_lines(self.pdf.doc[index]))
+
     def find_cached(self, query, page_indices=None):
-        return find_matches(self.pdf.doc, query, page_indices=page_indices, line_provider=self.text_lines)
+        return find_matches(self.pdf.doc, query, page_indices=page_indices, line_provider=self.search_text)
+
+    def search_document(self, position=0, jump=False):
+        """Search every page for the current query in slices, nearest pages
+        first, so the window stays live. When the last slice is in, `position`
+        becomes the current match and the Find window, if open, is told."""
+        doc, query = self.pdf.doc, self.search_query
+        self.search_matches, self.search_target = [], position
+        # No current match while pages are still to come: the list grows on both sides.
+        self.search_position = -1 if query else 0
+        if not query:
+            self.search_job.cancel()
+            return
+        def page(index):
+            if self.pdf is None or self.pdf.doc is not doc or index >= len(doc):
+                return []
+            return self.find_cached(query, [index])
+        def report(matches, done):
+            if self.pdf is None or self.pdf.doc is not doc:
+                self.search_job.cancel()
+                return
+            first = not self.search_matches
+            self.search_matches = matches
+            if done:
+                self.search_position = min(self.search_target, max(0, len(matches) - 1))
+            elif first and matches:
+                self.render()
+            if self.search_report:
+                self.search_report(done, jump)
+            elif done:
+                self.render()
+        pages = sorted(range(len(doc)), key=lambda index: (abs(index - self.index), index))
+        self.search_job.start(pages, page, report)
 
     def update_document_header(self):
         name = Path(self.path).name if self.path else 'Untitled.pdf'
@@ -229,9 +268,13 @@ class App(tk.Tk):
         self.index = max(0, min(self.index, len(self.pdf.doc) - 1))
         self.view_cache.sync(self.pdf.doc)
         self.view_cache.invalidate(dirty_pages)
+        self.search_cache.sync(self.pdf.doc)
+        self.search_cache.invalidate(dirty_pages)
         self.pages.refresh(self.pdf, self.index, dirty_pages=dirty_pages)
         if dirty_pages is None:
-            self.search_matches = self.find_cached(self.search_query)
+            self.search_document(self.search_target if self.search_job.running else self.search_position)
+        elif self.search_job.running:
+            self.search_job.redo(dirty_pages)
         else:
             matches = [m for m in self.search_matches if m['page'] not in dirty_pages]
             matches.extend(self.find_cached(self.search_query, sorted(dirty_pages)))
@@ -1219,7 +1262,7 @@ class App(tk.Tk):
         self.find_entry.grid(row=0, column=0, columnspan=3, sticky='ew', pady=5)
         pending = [None]
         def show(delta=0):
-            if self.busy or self.inline:
+            if self.busy or self.inline or self.search_job.running:
                 return
             if self.search_matches:
                 self.search_position = (self.search_position + delta) % len(self.search_matches)
@@ -1240,9 +1283,25 @@ class App(tk.Tk):
             if not self.pdf or self.busy:
                 return
             self.search_query = query.get()
-            self.search_matches = self.find_cached(self.search_query)
-            self.search_position = 0
-            show()
+            self.search_document(jump=True)
+            if self.search_job.running:
+                result.set('Searching…')
+            else:
+                show()
+        def report(done, jump):
+            if not done:
+                result.set(f'Searching… {len(self.search_matches)} found so far')
+            elif jump and not (self.busy or self.inline):
+                show()
+            else:
+                # A search repeated after undo or redo keeps the page in view.
+                self.render()
+                if self.search_matches:
+                    match = self.search_matches[self.search_position]
+                    result.set(f'{self.search_position + 1} of {len(self.search_matches)} · Page {match["page"] + 1}')
+                else:
+                    result.set('No matches. Scanned pages may need OCR.')
+        self.search_report = report
         def changed(*_):
             if pending[0]:
                 self.after_cancel(pending[0])
@@ -1250,8 +1309,9 @@ class App(tk.Tk):
         def close():
             if pending[0]:
                 self.after_cancel(pending[0])
-            self.search_query, self.search_matches = '', []
-            self.search_window = None
+            self.search_job.cancel()
+            self.search_query, self.search_matches, self.search_position = '', [], 0
+            self.search_window = self.search_report = None
             window.destroy()
             self.render()
         query.trace_add('write', changed)

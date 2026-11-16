@@ -40,3 +40,36 @@ class PageCache:
             del self.data[keys.pop(0)]
         return self.data[key]
 
+
+class TextCache:
+    """Packed search text (`text_tools.search_lines`) for every page of the open
+    document, so a repeated or extended query extracts nothing again. Bounded by
+    characters held rather than by pages; least recently searched pages go first."""
+
+    def __init__(self, limit=1_500_000):
+        self.limit = limit
+        self.owner = None
+        self.data = OrderedDict()
+        self.size = 0
+
+    def sync(self, doc):
+        if self.owner is not doc:
+            self.owner = doc
+            self.invalidate()
+
+    def invalidate(self, pages=None):
+        for page in list(self.data) if pages is None else pages:
+            if page in self.data:
+                self.size -= self.data.pop(page)[1]
+
+    def get(self, doc, page, factory):
+        self.sync(doc)
+        if page not in self.data:
+            lines = factory()
+            size = 1 + sum(len(line.text) for line in lines)
+            self.data[page] = lines, size
+            self.size += size
+        self.data.move_to_end(page)
+        while self.size > self.limit and len(self.data) > 1:
+            self.size -= self.data.popitem(last=False)[1][1]
+        return self.data[page][0]
