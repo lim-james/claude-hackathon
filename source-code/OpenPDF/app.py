@@ -37,6 +37,7 @@ from PIL import Image, ImageTk
 from core import PDF, page_numbers, images_to_pdf, office_to_pdf
 from text_tools import find_matches, replace_match, select_text, lines
 from box_tools import text_sections
+from outline_tools import append_bookmarks
 from inline_editor import InlineEditor
 from rich_editor import RichBoxEditor
 from rich_boxes import boxes, new_box, move_page, apply_redactions
@@ -1514,7 +1515,7 @@ class App(tk.Tk):
         self.require()
         name = sd.askstring('Bookmark', 'Title for this page:', parent=self)
         if name:
-            self.change(lambda: self.pdf.doc.set_toc(self.pdf.doc.get_toc() + [[1, name, self.index + 1]]))
+            self.change(lambda: append_bookmarks(self.pdf.doc, [[1, name, self.index + 1]]))
 
     def about(self):
         mb.showinfo('Feature status', 'OpenPDF · OpenSuite — AGPL-3.0-or-later\n\n'
