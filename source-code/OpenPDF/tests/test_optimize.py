@@ -1,3 +1,4 @@
+import faulthandler
 import io
 import tempfile
 import threading
@@ -32,7 +33,32 @@ def scan_pdf(dpi, pages=1):
     return pdf
 
 
+WAIT = 60  # seconds: no wait below is longer, so a stuck worker fails the test instead of holding the run
+
+
 class OptimizeJobTests(unittest.TestCase):
+    def setUp(self):
+        # Last resort for a wait nobody bounded: print every thread's stack and end the run.
+        faulthandler.dump_traceback_later(3 * WAIT, exit=True)
+        self.addCleanup(faulthandler.cancel_dump_traceback_later)
+
+    def finish(self, job, when=None):
+        """job.result() on a thread, as the app calls it; when() runs on this thread meanwhile."""
+        outcome = []
+        def run():
+            try:
+                outcome.append(job.result(WAIT))
+            except Exception as exc:
+                outcome.append(exc)
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        if when:
+            when()
+        thread.join(2 * WAIT)
+        self.assertFalse(thread.is_alive(), 'result() did not return')
+        self.assertFalse(job.started and job.process.is_alive(), 'the worker was left running')
+        return outcome[0]
+
     def test_reports_when_no_image_was_reduced(self):
         # MuPDF only halves: 200 DPI would land below the 120 DPI target, 300 DPI would not.
         for dpi, expected in ((200, 0), (300, 1)):
@@ -56,30 +82,67 @@ class OptimizeJobTests(unittest.TestCase):
             pdf.close()
         job = OptimizeJob(source, dict(dpi=100, quality=60))
         result = []
-        worker = threading.Thread(target=lambda: result.append(job.result()))
+        worker = threading.Thread(target=lambda: result.append(job.result(WAIT)), daemon=True)
         start = last = time.perf_counter()
         worker.start()
         longest = 0
-        while worker.is_alive():  # stands in for the window's event loop
+        while worker.is_alive() and last - start < 2 * WAIT:  # stands in for the window's event loop
             time.sleep(0.005)
             now = time.perf_counter()
             longest, last = max(longest, now - last), now
+        self.assertTrue(result, 'result() did not return')
         data, images, reduced = result[0]
         self.assertEqual((images, reduced), (4, 4))
         self.assertLess(len(data), len(source))
         self.assertLess(longest, (last - start) / 4,
                         f'caller blocked {longest:.2f} s of a {last - start:.2f} s optimization')
 
-    def test_job_reports_failure_and_cancel(self):
-        with self.assertRaises(RuntimeError):
-            OptimizeJob(b'not a pdf', {}).result()
-        pdf = scan_pdf(200, pages=4)
+    def source(self, pages=4):
+        pdf = scan_pdf(200, pages=pages)
         try:
-            job = OptimizeJob(pdf.doc.tobytes(), {})
+            return pdf.doc.tobytes()
         finally:
             pdf.close()
+
+    def test_job_reports_failure(self):
+        self.assertIsInstance(self.finish(OptimizeJob(b'not a pdf', {})), RuntimeError)
+
+    def test_cancel_before_the_worker_starts(self):
+        job = OptimizeJob(self.source(), {})
         job.cancel()
-        self.assertIsNone(job.result())
+        self.assertIsNone(self.finish(job))
+
+    def test_cancel_while_the_worker_starts(self):
+        # Estimate size, then Cancel straight away: the worker has not read the document yet.
+        job = OptimizeJob(self.source(), {})
+        self.assertIsNone(self.finish(job, job.cancel))
+
+    def test_cancel_while_the_worker_runs(self):
+        job = OptimizeJob(self.source(16), dict(dpi=100))  # seconds of work, cancelled half a second in
+        def cancel():
+            deadline = time.monotonic() + WAIT
+            while not job.started and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.5)
+            job.cancel()
+        self.assertIsNone(self.finish(job, cancel))
+
+    def test_worker_that_dies_is_reported(self):
+        job = OptimizeJob(self.source(), dict(dpi=100))
+        def kill():
+            deadline = time.monotonic() + WAIT
+            while not job.started and time.monotonic() < deadline:
+                time.sleep(0.01)
+            job.process.kill()
+        outcome = self.finish(job, kill)
+        self.assertIsInstance(outcome, RuntimeError)
+        self.assertIn('stopped unexpectedly', str(outcome))
+
+    def test_job_gives_up_after_its_timeout(self):
+        job = OptimizeJob(self.source(), dict(dpi=100))
+        with self.assertRaisesRegex(RuntimeError, 'did not finish'):
+            job.result(0.01)
+        self.assertFalse(job.process.is_alive())
 
 
 class OptimizeTests(unittest.TestCase):

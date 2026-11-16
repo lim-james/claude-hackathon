@@ -5,6 +5,7 @@ import difflib
 import html
 import io
 import multiprocessing
+import multiprocessing.connection
 import os
 import shutil
 import subprocess
@@ -33,9 +34,8 @@ def page_numbers(spec, count):
     return result
 
 
-def _optimize_worker(conn):
+def _optimize_worker(conn, data, options):
     try:
-        data, options = conn.recv_bytes(), conn.recv()
         conn.send((True, PDF.optimize_data(data, **options)))
     except Exception as exc:
         conn.send((False, str(exc)))
@@ -47,18 +47,30 @@ class OptimizeJob:
 
     def __init__(self, data, options):
         context = multiprocessing.get_context('spawn')  # fork is unsafe beside Tk and threads
-        self.conn, child = context.Pipe()
-        self.process = context.Process(target=_optimize_worker, args=(child,), daemon=True)
-        self.process.start()
-        child.close()
-        self.data, self.options, self.cancelled = data, options, False
+        self.conn, self.child = context.Pipe(duplex=False)
+        self.process = context.Process(target=_optimize_worker, args=(self.child, data, options), daemon=True)
+        self.started = self.cancelled = False
 
-    def result(self):
+    def result(self, timeout=None):
         """Wait for (bytes, images, reduced), or None once cancelled. Blocks: call it off the window thread."""
         try:
-            self.conn.send_bytes(self.data)
-            self.data = None
-            self.conn.send(self.options)
+            if self.cancelled:
+                return None
+            # The document travels with the start-up data, which a worker that dies early
+            # refuses. Nothing is written to the result pipe from this side: on Windows the
+            # worker's end stays open here until the worker takes it, so a write to a worker
+            # stopped before that would wait for ever.
+            self.process.start()
+            self.started = True
+            if self.cancelled:  # cancel() came while the worker was starting
+                self.process.terminate()
+            # For the same reason the pipe may never report the worker's death: watch the process too.
+            ready = multiprocessing.connection.wait([self.conn, self.process.sentinel], timeout)
+            if not ready:
+                self.process.terminate()
+                raise RuntimeError(f'The optimizer did not finish within {timeout:g} seconds.')
+            if self.conn not in ready and not self.conn.poll(0):
+                raise EOFError
             ok, value = self.conn.recv()
         except (EOFError, OSError):
             if self.cancelled:
@@ -66,14 +78,20 @@ class OptimizeJob:
             raise RuntimeError('The optimizer stopped unexpectedly.') from None
         finally:
             self.conn.close()
-            self.process.join()
+            self.child.close()
+            if self.started:
+                self.process.join(5)
+                if self.process.is_alive():
+                    self.process.kill()
+                    self.process.join(5)
         if not ok:
             raise RuntimeError(value)
         return value
 
     def cancel(self):
         self.cancelled = True
-        self.process.terminate()
+        if self.started:
+            self.process.terminate()
 
 
 class PDF:

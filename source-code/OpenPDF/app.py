@@ -1277,19 +1277,27 @@ class App(tk.Tk):
             job = OptimizeJob(self.pdf.doc.tobytes(), chosen)
             running.append(job)
             projected.set('Estimating…')
+            def work():
+                try:
+                    return job.result()
+                except Exception as exc:
+                    return exc  # handed to done, so the dialog stops saying "Estimating…"
             def done(result):
                 running.remove(job)
                 if result is None or not window.winfo_exists():
                     self.status.set('Estimate cancelled.')
                     return
+                if isinstance(result, Exception):
+                    projected.set('The estimate failed. Try again.')
+                    raise result
                 kept.update(options=chosen, result=result)
                 data, images, reduced = result
-                note = (f'No image was reduced: images are only halved, and only\nwhile they stay at or above '
+                note = (f'Images kept their resolution: they are only halved, and only\nwhile they stay at or above '
                         f'{chosen["dpi"]} DPI. Try a lower resolution.' if unreduced(chosen, images, reduced)
                         else 'Downsampling is lossy — review quality.')
                 projected.set(f'Projected: {human(len(data))} ({delta(len(data))}). {note}')
                 self.status.set(f'Projected: {human(len(data))} ({delta(len(data))}).')
-            self.background(job.result, done, 'Estimating optimized size…')
+            self.background(work, done, 'Estimating optimized size…')
         def closed(event):
             if event.widget is window:
                 kept.clear()
@@ -1310,7 +1318,7 @@ class App(tk.Tk):
                 return len(data), images, reduced
             def done(saved):
                 size, images, reduced = saved
-                note = ' No image was reduced.' if unreduced(chosen, images, reduced) else ''
+                note = ' Images kept their resolution.' if unreduced(chosen, images, reduced) else ''
                 self.status.set(f'Optimized {human(before)} → {human(size)} ({delta(size)}). Saved a new file.{note}')
             self.background(work, done, 'Optimizing PDF…')
         buttons = ttk.Frame(frame)
