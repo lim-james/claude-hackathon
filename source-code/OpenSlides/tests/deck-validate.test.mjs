@@ -63,6 +63,55 @@ for (const [name, change] of Object.entries(refusedFiles)) {
   });
 }
 
+// One element of each type, as the app writes them, so each type's own checks are exercised.
+const text = () => el({ type: 'text', html: '<p>Hi</p>', style: { fontFamily: 'theme:body', fontSize: 40, color: 'theme:text', valign: 'top' }, fill: 'transparent', padding: 8 });
+const image = () => el({ type: 'image', assetId: '', fit: 'cover', radius: 0, filters: { brightness: 1, contrast: 1, saturate: 1, grayscale: 0 } });
+const chart = () => el({ type: 'chart', chartType: 'column', data: { labels: ['Q1'], series: [{ name: '2026', values: [3] }] }, title: '', colors: [], fontFamily: 'theme:body', fontSize: 26, textColor: 'theme:text' });
+const table = () => el({ type: 'table', rows: [['A', 'B'], ['1', '2']], headerRow: true, style: { fontFamily: 'theme:body', fontSize: 28, color: 'theme:text' } });
+const withElement = (element, change) => {
+  const d = good();
+  d.slides[0].elements = [element];
+  change?.(element, d);
+  return d;
+};
+
+test('a deck file with a well-formed element of every type is fine', () => {
+  for (const make of [text, image, chart, table]) assert.equal(deckProblem(withElement(make())), null);
+  const d = good();
+  d.slides[0].background = { kind: 'gradient', from: '#000', to: 'theme:primary', angle: 90 };
+  assert.equal(deckProblem(d), null);
+});
+
+// Each of these passed the first version of the check and then threw while being drawn.
+const undrawableFiles = {
+  'a text element without style and html': [text, (e) => (delete e.style, delete e.html)],
+  'a text element without style': [text, (e) => delete e.style],
+  'a text element whose html is a number': [text, (e) => (e.html = 5)],
+  'a text element whose colour is a number': [text, (e) => (e.style.color = 5)],
+  'a shape whose fill is an object': [el, (e) => (e.fill = {})],
+  'an image element without filters': [image, (e) => delete e.filters],
+  'a chart element without data': [chart, (e) => delete e.data],
+  'a chart whose labels are not a list': [chart, (e) => (e.data.labels = 'Q1')],
+  'a chart series without values': [chart, (e) => delete e.data.series[0].values],
+  'a chart without its list of colours': [chart, (e) => delete e.colors],
+  'a table whose rows is a string': [table, (e) => (e.rows = 'A,B')],
+  'a table with a cell that is an object': [table, (e) => (e.rows[0][0] = {})],
+  'a table without style': [table, (e) => delete e.style],
+  'a layout without background': [el, (_e, d) => delete d.layouts[0].background],
+  'a layout background of an unknown kind': [el, (_e, d) => (d.layouts[0].background = { kind: 'video' })],
+  'a slide background that is a string': [el, (_e, d) => (d.slides[0].background = '#fff')],
+};
+for (const [name, [make, change]] of Object.entries(undrawableFiles)) {
+  test(`a deck file with ${name} is refused with a reason`, () => {
+    const d = withElement(make(), change);
+    const problem = deckProblem(d);
+    assert.equal(typeof problem, 'string');
+    assert.ok(problem.length > 0);
+    // Saved decks are only checked for their containers, so none of these is flagged in storage.
+    assert.equal(deckProblem(d, { stored: true }), null);
+  });
+}
+
 test('values that are not decks are refused, not thrown on', () => {
   for (const v of [null, undefined, 'deck', 7, [], {}]) {
     assert.equal(typeof deckProblem(v), 'string');

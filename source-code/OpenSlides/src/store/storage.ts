@@ -58,10 +58,28 @@ export async function deleteVersion(deckId: string, versionId: string): Promise<
   await del(`${versionPrefix(deckId)}${versionId}`);
 }
 
-export async function listDecks(): Promise<Deck[]> {
+/** A saved deck with the key it is stored under, which is the only name a deck without a usable `id` has. */
+export interface StoredDeck {
+  key: string;
+  deck: Deck;
+}
+
+export async function listStoredDecks(): Promise<StoredDeck[]> {
   const all = (await keys()).filter((k) => typeof k === 'string' && k.startsWith('deck:')) as string[];
   const decks = (await Promise.all(all.map((k) => get(k)))) as (Deck | undefined)[];
-  return decks.filter((d): d is Deck => !!d && Array.isArray(d.slides)).sort((a, b) => b.updatedAt - a.updatedAt);
+  return all
+    .map((key, i) => ({ key, deck: decks[i] }))
+    .filter((e): e is StoredDeck => !!e.deck && Array.isArray(e.deck.slides))
+    .sort((a, b) => b.deck.updatedAt - a.deck.updatedAt);
+}
+
+export async function listDecks(): Promise<Deck[]> {
+  return (await listStoredDecks()).map((e) => e.deck);
+}
+
+/** Deletes a saved deck by its storage key, so it works for a deck whose own `id` is missing or wrong. */
+export async function deleteStoredDeck(key: string): Promise<void> {
+  await deleteDeck(key.slice('deck:'.length));
 }
 
 export type SaveStatus = 'saved' | 'saving' | 'error';

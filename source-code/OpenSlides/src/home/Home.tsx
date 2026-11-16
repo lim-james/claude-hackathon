@@ -3,7 +3,7 @@ import { Copy, Download, FolderOpen, Plus, Trash2 } from 'lucide-react';
 import type { Deck } from '../model/types';
 import { TEMPLATES, createFromTemplate } from '../model/templates';
 import { SlideView } from '../render/SlideView';
-import { deleteDeck, listDecks, saveDeck } from '../store/storage';
+import { deleteDeck, deleteStoredDeck, listStoredDecks, saveDeck, type StoredDeck } from '../store/storage';
 import { exportDeckFile, readDeckFile, DECK_FILE_EXT } from '../io/deckfile';
 import { navigate } from '../router';
 import { uid } from '../model/factory';
@@ -59,14 +59,14 @@ function timeAgo(t: number) {
 }
 
 export function Home() {
-  const [decks, setDecks] = useState<Deck[] | null>(null);
+  const [decks, setDecks] = useState<StoredDeck[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const previews = useMemo(() => TEMPLATES.map((t) => ({ t, deck: createFromTemplate(t.id) })), []);
-  const damaged = useMemo(() => new Set((decks ?? []).filter((d) => deckProblem(d, { stored: true }))), [decks]);
+  const damaged = useMemo(() => new Set((decks ?? []).map((e) => e.deck).filter((d) => deckProblem(d, { stored: true }))), [decks]);
 
-  const refresh = () => listDecks().then(setDecks).catch(() => setError('This browser blocked local storage, so decks can’t be saved. Turn off private browsing and reload.'));
+  const refresh = () => listStoredDecks().then(setDecks).catch(() => setError('This browser blocked local storage, so decks can’t be saved. Turn off private browsing and reload.'));
   useEffect(() => {
     refresh();
     document.title = 'OpenSlides';
@@ -162,17 +162,17 @@ export function Home() {
           </div>
         ) : (
           <div className="deck-grid">
-            {decks.map((d, i) => damaged.has(d) ? (
+            {decks.map(({ key, deck: d }) => damaged.has(d) ? (
               <DamagedCard
-                key={typeof d.id === 'string' ? d.id : i}
+                key={key}
                 deck={d}
                 onDelete={async () => {
-                  await deleteDeck(d.id);
+                  await deleteStoredDeck(key);
                   refresh();
                 }}
               />
             ) : (
-              <div key={d.id} className="deck-card">
+              <div key={key} className="deck-card">
                 <button className="deck-open" onClick={() => navigate(`#/d/${d.id}`)} aria-label={`Open ${d.title}`}>
                   <ErrorBoundary fallback={<div className="deck-damaged">This deck can’t be previewed.</div>}>
                     <Thumb deck={d} width={260} />
