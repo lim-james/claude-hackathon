@@ -955,7 +955,7 @@ class App(tk.Tk):
 
     def import_form(self):
         self.require()
-        path = fd.askopenfilename(filetypes=[('Form data', '*.xfdf *.fdf *.xml')])
+        path = fd.askopenfilename(filetypes=[('Form data', '*.xfdf *.xml')])
         if not path:
             return
         result, refused = {}, []

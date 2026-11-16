@@ -209,5 +209,56 @@ class FormFieldTests(unittest.TestCase):
         self.assertEqual((self.values(self.pdf), refused), ({'town': 'Custom town'}, []))
 
 
+    ISSUE_67_FDF = (
+        '%FDF-1.2\n1 0 obj\n'
+        '<< /FDF << /Fields [ << /T (full_name) /V (Ada Lovelace) >> << /T (agree) /V /Yes >> ] >> >>\n'
+        'endobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n')
+
+    def test_file_that_is_not_xfdf_gets_a_plain_message_and_changes_nothing(self):
+        self.pdf.add_field(0, fitz.Rect(50, 50, 250, 80), 'full_name', 'text')
+        self.pdf.add_field(0, fitz.Rect(50, 100, 70, 120), 'agree', 'checkbox')
+        before = self.values(self.pdf)
+        cut_off = '<xfdf><fields><field name="full_name"><value>Ada Lovelace</value></field><field name="agr'
+        files = {
+            'answers.fdf': self.ISSUE_67_FDF.encode(),
+            'a document.pdf': self.pdf.bytes(),
+            'empty.xfdf': b'',
+            'cut off.xfdf': cut_off.encode(),
+            'no fields.xml': b'<?xml version="1.0"?><note><full_name>Ada Lovelace</full_name></note>',
+            'not utf-8.xfdf': b'<?xml version="1.0" encoding="UTF-8"?><xfdf><fields><field name="full_name">'
+                              b'<value>Ada \xff</value></field></fields></xfdf>',
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            for name, content in files.items():
+                with self.subTest(file=name):
+                    data = Path(folder) / name
+                    data.write_bytes(content)
+                    with self.assertRaises(ValueError) as raised:
+                        self.pdf.import_form_data(data)
+                    self.assertEqual(str(raised.exception), 'This is not an XFDF file.')
+                    self.assertEqual(self.values(self.pdf), before)
+
+    def test_xfdf_with_no_fields_or_no_matching_names_imports_nothing(self):
+        self.pdf.add_field(0, fitz.Rect(50, 50, 250, 80), 'full_name', 'text')
+        before = self.values(self.pdf)
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder) / 'empty form.xfdf'
+            blank = PDF()
+            try:
+                blank.doc.new_page()
+                self.assertEqual(blank.export_form_data(data), 0)  # what OpenPDF writes for a form with no fields
+            finally:
+                blank.close()
+            self.assertEqual(self.pdf.import_form_data(data), 0)
+        other = '<xfdf><fields><field name="someone_else"><value>x</value></field></fields></xfdf>'
+        self.assertEqual(self.import_text(self.pdf, other), 0)
+        self.assertEqual(self.values(self.pdf), before)
+
+    def test_import_picker_offers_only_the_formats_that_are_read(self):
+        source = (Path(__file__).resolve().parent.parent / 'app.py').read_text(encoding='utf-8')
+        body = source.split('def import_form(self):', 1)[1].split('\n    def ', 1)[0]
+        self.assertIn("'*.xfdf *.xml'", body)
+        self.assertNotIn('.fdf ', body.replace('.xfdf', ''))
+
 if __name__ == '__main__':
     unittest.main()
