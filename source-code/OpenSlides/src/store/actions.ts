@@ -519,38 +519,42 @@ export function moveSlide(id: string, toIndex: number) {
 export function changeLayout(slideId: string, layoutId: string) {
   const d = S().deck;
   if (!d) return;
-  mutate((dd) => {
-    const slide = dd.slides.find((s) => s.id === slideId);
-    if (!slide) return;
-    const oldLayout = getLayout(dd as Deck, slide.layoutId);
-    const newLayout = getLayout(dd as Deck, layoutId);
-    const fresh = makeSlide(newLayout);
-    const kindOf = (el: SlideElement) => oldLayout.elements.find((l) => l.id === el.ph?.ref)?.placeholder;
-    const used = new Set<string>();
-    const kept: SlideElement[] = [];
-    for (const el of slide.elements as SlideElement[]) {
-      if (!el.ph) {
-        kept.push(el);
-        continue;
-      }
-      const kind = kindOf(el);
-      const match = fresh.elements.find((f) => !used.has(f.id) && newLayout.elements.find((l) => l.id === f.ph?.ref)?.placeholder === kind && f.type === el.type);
-      if (match) {
-        used.add(match.id);
-        if (match.type === 'text' && el.type === 'text') match.html = el.html;
-        if (match.type === 'image' && el.type === 'image') match.assetId = el.assetId;
-        if (!el.ph.style && match.ph && el.type === 'text' && match.type === 'text') {
-          match.style = el.style;
-          match.ph.style = false;
-        }
-      } else {
-        const resolved = resolveElement(el, oldLayout);
-        const hasContent = (resolved.type === 'text' && resolved.html.replace(/<[^>]*>/g, '').trim()) || (resolved.type === 'image' && resolved.assetId);
-        if (hasContent) kept.push({ ...resolved, ph: undefined });
-      }
+  // Built from the plain deck, before mutate: makeSlide clones the layout's
+  // elements, and an immer draft cannot be cloned.
+  const slide = d.slides.find((s) => s.id === slideId);
+  if (!slide) return;
+  const oldLayout = getLayout(d, slide.layoutId);
+  const newLayout = getLayout(d, layoutId);
+  const fresh = makeSlide(newLayout);
+  const kindOf = (el: SlideElement) => oldLayout.elements.find((l) => l.id === el.ph?.ref)?.placeholder;
+  const used = new Set<string>();
+  const kept: SlideElement[] = [];
+  for (const el of slide.elements) {
+    if (!el.ph) {
+      kept.push(el);
+      continue;
     }
-    slide.layoutId = layoutId;
-    slide.elements = [...fresh.elements, ...kept] as Draft<SlideElement>[];
+    const kind = kindOf(el);
+    const match = fresh.elements.find((f) => !used.has(f.id) && newLayout.elements.find((l) => l.id === f.ph?.ref)?.placeholder === kind && f.type === el.type);
+    if (match) {
+      used.add(match.id);
+      if (match.type === 'text' && el.type === 'text') match.html = el.html;
+      if (match.type === 'image' && el.type === 'image') match.assetId = el.assetId;
+      if (!el.ph.style && match.ph && el.type === 'text' && match.type === 'text') {
+        match.style = el.style;
+        match.ph.style = false;
+      }
+    } else {
+      const resolved = resolveElement(el, oldLayout);
+      const hasContent = (resolved.type === 'text' && resolved.html.replace(/<[^>]*>/g, '').trim()) || (resolved.type === 'image' && resolved.assetId);
+      if (hasContent) kept.push({ ...resolved, ph: undefined });
+    }
+  }
+  mutate((dd) => {
+    const target = dd.slides.find((s) => s.id === slideId);
+    if (!target) return;
+    target.layoutId = layoutId;
+    target.elements = [...fresh.elements, ...kept] as Draft<SlideElement>[];
   });
   useEditor.setState({ selection: [], editingId: null });
 }
