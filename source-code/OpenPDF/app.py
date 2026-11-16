@@ -55,6 +55,7 @@ class App(tk.Tk):
         self.geometry(f'{min(1440, self.winfo_screenwidth()-24)}x{min(900, self.winfo_screenheight()-100)}')
         self.minsize(1000, 650)
         self.pdf = None
+        self.password = ''  # of the open document; memory only, protects its saved versions
         self.path = None
         self.index = 0
         self.zoom = 1.0
@@ -135,7 +136,7 @@ class App(tk.Tk):
         loaded = PDF(path, password)
         if self.pdf:
             self.pdf.close()
-        self.pdf, self.path = loaded, path
+        self.pdf, self.path, self.password = loaded, path, password
         self.history, self.redo_history, self.index, self.dirty = [], [], 0, False
         self.search_query = ''
         self.refresh()
@@ -154,6 +155,7 @@ class App(tk.Tk):
         if self.pdf:
             self.pdf.close()
         self.pdf = PDF()
+        self.password = ''
         self.pdf.doc.new_page()
         self.pdf.restore(self.pdf.bytes())  # gives undo a base now, so the first edit does not reopen the document
         self.path, self.history, self.redo_history, self.index, self.dirty = None, [], [], 0, True
@@ -170,6 +172,7 @@ class App(tk.Tk):
             self.pdf.save(path)
             self.dirty = False
             self.path = path
+            self.password = ''  # the file now at self.path is unencrypted
             self.update_document_header()
             self.status.set(f'Saved {path}. Export is unencrypted; use Password export to encrypt.')
 
@@ -1126,12 +1129,14 @@ class App(tk.Tk):
     def _restore_version(self, version_id):
         # Snapshot the current state first, and record an in-memory undo step, so
         # a restore can be reversed.
-        save_version(self.path, self.pdf.doc.tobytes(garbage=4, deflate=True), 'Before restore')
         data = read_version(self.path, version_id)
-        self.history.append(self.pdf.bytes())
+        undo_step = self.pdf.bytes()
+        before = self.pdf.snapshot_bytes(self.password)
+        self.pdf.restore(data, self.password)  # raises, changing nothing, if it cannot be unlocked
+        save_version(self.path, before, 'Before restore')
+        self.history.append(undo_step)
         self.history = self.history[-8:]
         self.redo_history.clear()
-        self.pdf.restore(data)
         self.dirty = True
         self.refresh()
         self.status.set('Version restored. Undo to go back, or Save as to keep it.')
@@ -1146,8 +1151,9 @@ class App(tk.Tk):
         window.geometry('640x420')
         frame = ttk.Frame(window, padding=12)
         frame.pack(fill='both', expand=True)
-        ttk.Label(frame, text='Snapshots of this document stay on this computer. Save a version, '
-                             'then restore or compare it later.', style='Muted.TLabel', wraplength=600).pack(anchor='w')
+        ttk.Label(frame, text='Snapshots of this document stay on this computer'
+                             + (", protected with the document's password" if self.password else '')
+                             + '. Save a version, then restore or compare it later.', style='Muted.TLabel', wraplength=600).pack(anchor='w')
         saver = ttk.Frame(frame)
         saver.pack(fill='x', pady=8)
         label = tk.StringVar()
@@ -1170,7 +1176,7 @@ class App(tk.Tk):
                 raise ValueError('Select a version in the list first.')
             return item
         def save():
-            save_version(self.path, self.pdf.doc.tobytes(garbage=4, deflate=True), label.get())
+            save_version(self.path, self.pdf.snapshot_bytes(self.password), label.get())
             label.set('')
             reload()
             self.status.set('Version saved.')
@@ -1183,7 +1189,7 @@ class App(tk.Tk):
         def compare():
             item = selected()
             out = Path(tempfile.mkdtemp()) / 'version-diff.html'
-            self.pdf.compare(str(version_file(self.path, item['id'])), str(out))
+            self.pdf.compare(str(version_file(self.path, item['id'])), str(out), self.password)
             webbrowser.open(out.resolve().as_uri())
         def delete():
             item = selected()

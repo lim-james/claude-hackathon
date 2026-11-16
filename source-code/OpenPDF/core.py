@@ -61,11 +61,17 @@ class PDF:
         # compression belong to Save as, not every mouse gesture or edit.
         return self.doc.tobytes(garbage=0, deflate=False)
 
-    def restore(self, data):
-        # data is what bytes() or snapshot() returned.
+    def restore(self, data, password=''):
+        # data is what bytes() or snapshot() returned. Open and unlock the
+        # replacement first, so a snapshot that cannot be read leaves the
+        # current document as it is.
         base, tail = data if isinstance(data, tuple) else (data, b'')
+        doc = fitz.open(stream=base + tail if tail else base, filetype='pdf')
+        if doc.needs_pass and not doc.authenticate(password):
+            doc.close()
+            raise ValueError('Incorrect password.')
         self.doc.close()
-        self.doc = fitz.open(stream=base + tail if tail else base, filetype='pdf')
+        self.doc = doc
         self._base, self._tail, self._xrefs, self._changed, self._file = base, tail, self.doc.xref_length(), False, None
 
     def snapshot(self):
@@ -180,7 +186,20 @@ class PDF:
                 mask |= flags
         return mask
 
+    def snapshot_bytes(self, password=''):
+        # A copy that is kept on disk (version history). With a password it is
+        # encrypted exactly as save() encrypts, so it is no easier to read than
+        # the protected document it was taken from.
+        data = self.doc.tobytes(**self._save_options(password))
+        self._base = self._file = None  # garbage collection renumbered the open document
+        return data
+
     def save(self, path, password='', owner_password='', permissions=None):
+        data = self.doc.tobytes(**self._save_options(password, owner_password, permissions))
+        self._base = self._file = None  # garbage collection renumbered the open document
+        self._atomic_write(path, data)
+
+    def _save_options(self, password='', owner_password='', permissions=None):
         options = dict(garbage=4, deflate=True)
         if password:
             if permissions is None:  # no restrictions chosen: grant everything
@@ -188,9 +207,7 @@ class PDF:
             options.update(encryption=fitz.PDF_ENCRYPT_AES_256,
                            user_pw=password, owner_pw=owner_password or password,
                            permissions=permissions)
-        data = self.doc.tobytes(**options)
-        self._base = self._file = None  # garbage collection renumbered the open document
-        self._atomic_write(path, data)
+        return options
 
     @staticmethod
     def _atomic_write(path, data):
@@ -601,8 +618,8 @@ class PDF:
                     out.add_paragraph(block[4])
         out.save(path)
 
-    def compare(self, other_path, output):
-        other = PDF(other_path)
+    def compare(self, other_path, output, password=''):
+        other = PDF(other_path, password)
         try:
             left = '\n'.join(p.get_text(sort=True) for p in self.doc).splitlines()
             right = '\n'.join(p.get_text(sort=True) for p in other.doc).splitlines()
