@@ -174,6 +174,11 @@ class SlicedSearch:
     def running(self):
         return bool(self.pending)
 
+    @property
+    def progress(self):
+        """(pages searched, pages in all) for the search that is running."""
+        return len(self.found), len(self.found) + len(self.pending)
+
     def start(self, pages, search_page, report):
         """Search `pages` in the given order. `search_page(index)` returns one
         page's matches; `report(matches, done)` gets everything found so far,
@@ -186,11 +191,18 @@ class SlicedSearch:
             if generation != self.generation:
                 return
             deadline = self.clock() + self.budget
-            while self.pending:
-                index = self.pending.popleft()
-                self.found[index] = search_page(index)
-                if self.clock() >= deadline:
-                    break
+            # The collector waits for the whole slice; switched per page it ran once a page (see find_matches).
+            collecting = gc.isenabled()
+            gc.disable()
+            try:
+                while self.pending:
+                    index = self.pending.popleft()
+                    self.found[index] = search_page(index)
+                    if self.clock() >= deadline:
+                        break
+            finally:
+                if collecting:
+                    gc.enable()
             report([m for index in sorted(self.found) for m in self.found[index]], not self.pending)
             if self.pending and generation == self.generation:
                 self.schedule(tick)

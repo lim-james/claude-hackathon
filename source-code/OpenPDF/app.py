@@ -227,6 +227,9 @@ class App(tk.Tk):
         self.search_position = -1 if query else 0
         if not query:
             self.search_job.cancel()
+            # Opening or creating a document empties the query: the Find window must stop saying it searches.
+            if self.search_report:
+                self.search_report(True, jump)
             return
         def page(index):
             if self.pdf is None or self.pdf.doc is not doc or index >= len(doc):
@@ -1257,10 +1260,13 @@ class App(tk.Tk):
         frame = ttk.Frame(window, padding=12)
         frame.pack()
         query = tk.StringVar(value=self.search_query)
-        result = tk.StringVar(value='Type to highlight matching words on the page.')
+        hint = 'Type to highlight matching words on the page.'
+        result = tk.StringVar(value=hint)
         self.find_entry = ttk.Entry(frame, textvariable=query, width=32)
         self.find_entry.grid(row=0, column=0, columnspan=3, sticky='ew', pady=5)
         pending = [None]
+        def nothing():
+            return 'No matches. Scanned pages may need OCR.' if self.search_query else hint
         def show(delta=0):
             if self.busy or self.inline or self.search_job.running:
                 return
@@ -1277,7 +1283,7 @@ class App(tk.Tk):
                 result.set(f'{self.search_position + 1} of {len(self.search_matches)} · Page {self.index + 1}')
             else:
                 self.render()
-                result.set('No matches. Scanned pages may need OCR.')
+                result.set(nothing())
         def perform():
             pending[0] = None
             if not self.pdf or self.busy:
@@ -1286,11 +1292,10 @@ class App(tk.Tk):
             self.search_document(jump=True)
             if self.search_job.running:
                 result.set('Searching…')
-            else:
-                show()
         def report(done, jump):
             if not done:
-                result.set(f'Searching… {len(self.search_matches)} found so far')
+                searched, total = self.search_job.progress
+                result.set(f'Searching… {searched} of {total} pages · {len(self.search_matches)} found')
             elif jump and not (self.busy or self.inline):
                 show()
             else:
@@ -1300,7 +1305,7 @@ class App(tk.Tk):
                     match = self.search_matches[self.search_position]
                     result.set(f'{self.search_position + 1} of {len(self.search_matches)} · Page {match["page"] + 1}')
                 else:
-                    result.set('No matches. Scanned pages may need OCR.')
+                    result.set(nothing())
         self.search_report = report
         def changed(*_):
             if pending[0]:

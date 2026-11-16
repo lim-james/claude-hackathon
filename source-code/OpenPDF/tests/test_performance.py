@@ -1,3 +1,4 @@
+import gc
 import re
 import unittest
 from types import SimpleNamespace
@@ -211,6 +212,21 @@ class PerformanceTests(unittest.TestCase):
             self.assertTrue(last[-1][1])
             self.assertEqual(len(last[-1][0]), 11)
             self.assertEqual(last[-1][0], find_matches(doc, 'paragraph'))
+
+    def test_sliced_search_counts_pages_and_pauses_the_collector_for_each_slice(self):
+        with search_document() as doc:
+            search, queue = self.sliced(doc)
+            collecting, progress = [], []
+            def page(index):
+                collecting.append(gc.isenabled())
+                return find_matches(doc, 'paragraph', [index])
+            self.assertTrue(gc.isenabled())
+            search.start([0, 1, 2], page, lambda matches, done: progress.append(search.progress))
+            while queue:
+                queue.pop(0)()
+                self.assertTrue(gc.isenabled())
+            self.assertEqual(collecting, [False, False, False])
+            self.assertEqual(progress, [(1, 3), (2, 3), (3, 3)])
 
     def test_direct_pixels_match_png_render(self):
         import io
