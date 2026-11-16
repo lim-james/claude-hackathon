@@ -481,6 +481,7 @@ def exercise_app(app):
     # PDF Optimizer: downsample a high-resolution image and confirm the file shrinks.
     import io
     import os as _os
+    import time as _time
     from PIL import Image as _Image
     for child in app.winfo_children():
         if isinstance(child, tk.Toplevel):
@@ -501,7 +502,15 @@ def exercise_app(app):
     dialog = next(w for w in app.winfo_children() if isinstance(w, tk.Toplevel))
     next(w for w in descendants(dialog)
          if w.winfo_class() == 'TButton' and w.cget('text') == 'Estimate size').invoke()
-    app.update()
+    def settle():  # Estimate and Export finish in a worker process
+        deadline = _time.monotonic() + 120
+        while app.busy and _time.monotonic() < deadline:
+            app.update()
+            _time.sleep(0.01)
+        assert not app.busy, 'Optimize did not finish'
+        app.update()
+    assert app.busy, 'Estimate ran on the window thread'
+    settle()
     projected = next(w for w in descendants(dialog) if w.winfo_class() == 'TLabel' and str(w.cget('textvariable')))
     assert 'Projected' in app.getvar(projected.cget('textvariable')), 'Estimate did not report a projection'
     with tempfile.TemporaryDirectory() as folder:
@@ -511,7 +520,7 @@ def exercise_app(app):
         try:
             next(w for w in descendants(dialog)
                  if w.winfo_class() == 'TButton' and w.cget('text') == 'Export').invoke()
-            app.update()
+            settle()
         finally:
             app.output = original_output
         assert _os.path.getsize(out) < before, 'Optimized file was not smaller than the original'

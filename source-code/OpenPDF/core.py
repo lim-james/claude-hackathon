@@ -4,6 +4,7 @@ import datetime
 import difflib
 import html
 import io
+import multiprocessing
 import os
 import shutil
 import subprocess
@@ -30,6 +31,49 @@ def page_numbers(spec, count):
     if not result or any(p < 0 or p >= count for p in result):
         raise ValueError(f'Enter pages between 1 and {count}, e.g. 1,3-5.')
     return result
+
+
+def _optimize_worker(conn):
+    try:
+        data, options = conn.recv_bytes(), conn.recv()
+        conn.send((True, PDF.optimize_data(data, **options)))
+    except Exception as exc:
+        conn.send((False, str(exc)))
+
+
+class OptimizeJob:
+    """PDF.optimize_data in a process of its own. MuPDF keeps the interpreter
+    lock while it rewrites images, so a thread would still freeze the window."""
+
+    def __init__(self, data, options):
+        context = multiprocessing.get_context('spawn')  # fork is unsafe beside Tk and threads
+        self.conn, child = context.Pipe()
+        self.process = context.Process(target=_optimize_worker, args=(child,), daemon=True)
+        self.process.start()
+        child.close()
+        self.data, self.options, self.cancelled = data, options, False
+
+    def result(self):
+        """Wait for (bytes, images, reduced), or None once cancelled. Blocks: call it off the window thread."""
+        try:
+            self.conn.send_bytes(self.data)
+            self.data = None
+            self.conn.send(self.options)
+            ok, value = self.conn.recv()
+        except (EOFError, OSError):
+            if self.cancelled:
+                return None
+            raise RuntimeError('The optimizer stopped unexpectedly.') from None
+        finally:
+            self.conn.close()
+            self.process.join()
+        if not ok:
+            raise RuntimeError(value)
+        return value
+
+    def cancel(self):
+        self.cancelled = True
+        self.process.terminate()
 
 
 class PDF:
@@ -100,27 +144,41 @@ class PDF:
     def current_size(self):
         return len(self.doc.tobytes(garbage=4, deflate=True))
 
-    def optimized_bytes(self, dpi=120, quality=70, downsample_images=True,
-                        subset_fonts=True, strip_metadata=False):
-        # Work on a copy so the open document is never mutated by optimization.
-        work = fitz.open('pdf', self.doc.tobytes())
+    @staticmethod
+    def optimize_data(data, dpi=120, quality=70, downsample_images=True,
+                      subset_fonts=True, strip_metadata=False):
+        """Optimize PDF bytes. Returns (bytes, images, reduced): how many page
+        images there are and how many of them came out with fewer pixels."""
+        work = fitz.open('pdf', data)
         try:
             if strip_metadata:
                 work.set_metadata({})
                 work.del_xml_metadata()
+            images = reduced = 0
             if downsample_images:
+                def sizes():
+                    return [image[2:4] for page in work for image in page.get_images()]
+                before = sizes()
                 # Downsample images meaningfully above the target DPI (Acrobat uses
                 # a ~1.5x threshold) down to it, re-encoding at the chosen quality.
+                # MuPDF only halves an image, and only while half stays at or above
+                # the target: a 200 DPI scan is left alone at 120 DPI.
                 work.rewrite_images(dpi_threshold=max(dpi + 1, round(dpi * 1.5)), dpi_target=dpi,
                                     quality=quality, lossy=True, lossless=True)
+                images = len(before)
+                reduced = sum(a != b for a, b in zip(before, sizes()))
             if subset_fonts:
                 try:
                     work.subset_fonts()
                 except Exception:
                     pass  # subsetting can fail on unusual fonts; skip rather than abort
-            return work.tobytes(garbage=4, deflate=True, clean=True)
+            return work.tobytes(garbage=4, deflate=True, clean=True), images, reduced
         finally:
             work.close()
+
+    def optimized_bytes(self, **options):
+        # Work on a copy so the open document is never mutated by optimization.
+        return self.optimize_data(self.doc.tobytes(), **options)[0]
 
     def optimize(self, path, **options):
         data = self.optimized_bytes(**options)

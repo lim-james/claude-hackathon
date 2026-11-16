@@ -1,5 +1,6 @@
 """OpenPDF Studio: local desktop PDF workstation."""
 import io
+import multiprocessing
 import queue
 import secrets
 import sys
@@ -14,9 +15,11 @@ from pathlib import Path
 import webbrowser
 from versions import save_version, list_versions, read_version, delete_version, version_file
 
+multiprocessing.freeze_support()  # in the built executable, an optimizer worker process runs from here
+
 # Windowed executables have no standard streams. Some conversion dependencies
 # write progress output; give them a real stream and retain diagnostic failures.
-if '--self-test' in sys.argv:
+if '--self-test' in sys.argv and __name__ == '__main__':  # not in an optimizer worker, which imports this file
     sys.stdout = open('smoke-output.log', 'w', encoding='utf-8', buffering=1)
     sys.stderr = sys.stdout
     def test_exception(kind, value, tb):
@@ -34,7 +37,7 @@ elif sys.stdout is None or sys.stderr is None:
 
 import fitz
 from PIL import Image, ImageTk
-from core import PDF, page_numbers, images_to_pdf, office_to_pdf
+from core import PDF, OptimizeJob, page_numbers, images_to_pdf, office_to_pdf
 from text_tools import find_matches, replace_match, select_text, lines
 from box_tools import text_sections
 from inline_editor import InlineEditor
@@ -1264,15 +1267,52 @@ class App(tk.Tk):
         def options():
             return dict(dpi=max(50, min(300, dpi.get())), quality=max(20, min(95, quality.get())),
                         downsample_images=images.get(), subset_fonts=fonts.get(), strip_metadata=meta.get())
+        kept = {}     # the last estimate and its options, so Export does not repeat the work
+        running = []  # the estimate's worker, stopped when the dialog closes
+        def unreduced(chosen, images, reduced):
+            return chosen['downsample_images'] and images and not reduced
         def estimate():
-            size = len(self.pdf.optimized_bytes(**options()))
-            projected.set(f'Projected: {human(size)} ({delta(size)}). Downsampling is lossy — review quality.')
+            chosen = options()
+            kept.clear()
+            job = OptimizeJob(self.pdf.doc.tobytes(), chosen)
+            running.append(job)
+            projected.set('Estimating…')
+            def done(result):
+                running.remove(job)
+                if result is None or not window.winfo_exists():
+                    self.status.set('Estimate cancelled.')
+                    return
+                kept.update(options=chosen, result=result)
+                data, images, reduced = result
+                note = (f'No image was reduced: images are only halved, and only\nwhile they stay at or above '
+                        f'{chosen["dpi"]} DPI. Try a lower resolution.' if unreduced(chosen, images, reduced)
+                        else 'Downsampling is lossy — review quality.')
+                projected.set(f'Projected: {human(len(data))} ({delta(len(data))}). {note}')
+                self.status.set(f'Projected: {human(len(data))} ({delta(len(data))}).')
+            self.background(job.result, done, 'Estimating optimized size…')
+        def closed(event):
+            if event.widget is window:
+                kept.clear()
+                for job in running:
+                    job.cancel()
+        window.bind('<Destroy>', closed)
         def export():
+            chosen = options()
+            result = kept.get('result') if kept.get('options') == chosen else None
             window.destroy()
             path = self.output('.pdf')
-            if path:
-                size = self.pdf.optimize(path, **options())
-                self.status.set(f'Optimized {human(before)} → {human(size)} ({delta(size)}). Saved a new file.')
+            if not path:
+                return
+            job = None if result else OptimizeJob(self.pdf.doc.tobytes(), chosen)
+            def work():
+                data, images, reduced = result or job.result()
+                PDF._atomic_write(path, data)
+                return len(data), images, reduced
+            def done(saved):
+                size, images, reduced = saved
+                note = ' No image was reduced.' if unreduced(chosen, images, reduced) else ''
+                self.status.set(f'Optimized {human(before)} → {human(size)} ({delta(size)}). Saved a new file.{note}')
+            self.background(work, done, 'Optimizing PDF…')
         buttons = ttk.Frame(frame)
         buttons.pack(anchor='e', pady=(10, 0))
         ttk.Button(buttons, text='Cancel', command=window.destroy).pack(side='right', padx=(6, 0))
