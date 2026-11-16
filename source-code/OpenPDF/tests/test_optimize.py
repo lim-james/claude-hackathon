@@ -33,7 +33,10 @@ def scan_pdf(dpi, pages=1):
     return pdf
 
 
-WAIT = 60  # seconds: no wait below is longer, so a stuck worker fails the test instead of holding the run
+WAIT = 60    # seconds: no wait below is longer, so a stuck worker fails the test instead of holding the run
+SLOW = 24     # pages that keep the worker busy for seconds
+WORKING = 2   # seconds after its start by which the worker is at work on them
+PROMPT = 20   # seconds within which result() must return once its worker is cancelled, killed or done
 
 
 class OptimizeJobTests(unittest.TestCase):
@@ -54,8 +57,8 @@ class OptimizeJobTests(unittest.TestCase):
         thread.start()
         if when:
             when()
-        thread.join(2 * WAIT)
-        self.assertFalse(thread.is_alive(), 'result() did not return')
+        thread.join(PROMPT)
+        self.assertFalse(thread.is_alive(), f'result() did not return within {PROMPT} s')
         self.assertFalse(job.started and job.process.is_alive(), 'the worker was left running')
         return outcome[0]
 
@@ -107,36 +110,89 @@ class OptimizeJobTests(unittest.TestCase):
     def test_job_reports_failure(self):
         self.assertIsInstance(self.finish(OptimizeJob(b'not a pdf', {})), RuntimeError)
 
+    # Cancel, or the worker killed, at each point of a job. Every one must end result() promptly.
+
+    def after_start(self, job, seconds, act):
+        def when():
+            deadline = time.monotonic() + WAIT
+            while not job.started and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(seconds)
+            act()
+        return when
+
+    def assert_stopped(self, outcome):
+        self.assertIsInstance(outcome, RuntimeError)
+        self.assertIn('stopped unexpectedly', str(outcome))
+
+    def assert_cancelled(self, outcome):  # not assertIsNone, which would print a whole document
+        self.assertTrue(outcome is None, f'expected None, got {type(outcome).__name__}')
+
     def test_cancel_before_the_worker_starts(self):
         job = OptimizeJob(self.source(), {})
         job.cancel()
-        self.assertIsNone(self.finish(job))
+        self.assert_cancelled(self.finish(job))
 
     def test_cancel_while_the_worker_starts(self):
         # Estimate size, then Cancel straight away: the worker has not read the document yet.
         job = OptimizeJob(self.source(), {})
-        self.assertIsNone(self.finish(job, job.cancel))
+        self.assert_cancelled(self.finish(job, job.cancel))
+
+    def test_worker_killed_while_it_starts(self):
+        job = OptimizeJob(self.source(), dict(dpi=100))
+        self.assert_stopped(self.finish(job, self.after_start(job, 0, lambda: job.process.kill())))
 
     def test_cancel_while_the_worker_runs(self):
-        job = OptimizeJob(self.source(16), dict(dpi=100))  # seconds of work, cancelled half a second in
-        def cancel():
-            deadline = time.monotonic() + WAIT
-            while not job.started and time.monotonic() < deadline:
-                time.sleep(0.01)
-            time.sleep(0.5)
-            job.cancel()
-        self.assertIsNone(self.finish(job, cancel))
+        job = OptimizeJob(self.source(SLOW), dict(dpi=100))
+        self.assert_cancelled(self.finish(job, self.after_start(job, WORKING, job.cancel)))
 
-    def test_worker_that_dies_is_reported(self):
-        job = OptimizeJob(self.source(), dict(dpi=100))
-        def kill():
-            deadline = time.monotonic() + WAIT
-            while not job.started and time.monotonic() < deadline:
-                time.sleep(0.01)
-            job.process.kill()
-        outcome = self.finish(job, kill)
-        self.assertIsInstance(outcome, RuntimeError)
-        self.assertIn('stopped unexpectedly', str(outcome))
+    def test_worker_killed_while_it_runs(self):
+        job = OptimizeJob(self.source(SLOW), dict(dpi=100))
+        self.assert_stopped(self.finish(job, self.after_start(job, WORKING, lambda: job.process.kill())))
+
+    def sending(self, act):
+        """A job stopped as its result starts to arrive: act() runs then, with the worker
+        still writing, because the result is larger than a pipe holds and nobody reads it yet."""
+        source, options = self.source(), dict(downsample_images=False, subset_fonts=False)
+        self.assertGreater(len(PDF.optimize_data(source, **options)[0]), 1 << 20)
+        job = OptimizeJob(source, options)
+        receive = job.conn.recv
+        def recv():
+            time.sleep(0.02)
+            self.assertTrue(job.process.is_alive(), 'the worker finished without its result being read')
+            act(job)
+            job.process.join(WAIT)
+            return receive()
+        job.conn.recv = recv
+        return job
+
+    def test_cancel_while_the_result_is_sent(self):
+        self.assert_cancelled(self.finish(self.sending(lambda job: job.cancel())))
+
+    def test_worker_killed_while_the_result_is_sent(self):
+        self.assert_stopped(self.finish(self.sending(lambda job: job.process.kill())))
+
+    def arrived(self, act):
+        """A job whose whole result has been received: act() runs then, before result() returns."""
+        job = OptimizeJob(self.source(), dict(downsample_images=False, subset_fonts=False))
+        receive = job.conn.recv
+        def recv():
+            value = receive()
+            act(job)
+            return value
+        job.conn.recv = recv
+        return job
+
+    def test_cancel_after_the_result_arrived(self):
+        job = self.arrived(lambda job: job.cancel())
+        self.assert_cancelled(self.finish(job))
+        job.cancel()  # and again once result() has returned: nothing left to stop
+
+    def test_worker_killed_after_the_result_arrived(self):
+        data, images, reduced = self.finish(self.arrived(lambda job: job.process.kill()))
+        self.assertEqual(images, 0)  # counted only when downsampling
+        with fitz.open('pdf', data) as out:
+            self.assertEqual(len(out), 4)
 
     def test_job_gives_up_after_its_timeout(self):
         job = OptimizeJob(self.source(), dict(dpi=100))

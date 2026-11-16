@@ -7,6 +7,7 @@ import io
 import multiprocessing
 import multiprocessing.connection
 import os
+import pickle
 import shutil
 import subprocess
 import sys
@@ -62,9 +63,13 @@ class OptimizeJob:
             # stopped before that would wait for ever.
             self.process.start()
             self.started = True
+            # The worker has its own copy of its end. With this one closed, a worker that
+            # dies part-way through sending its result ends the read below instead of
+            # leaving it waiting for the rest.
+            self.child.close()
             if self.cancelled:  # cancel() came while the worker was starting
                 self.process.terminate()
-            # For the same reason the pipe may never report the worker's death: watch the process too.
+            # On Windows a worker that dies before taking its end leaves the pipe open: watch the process too.
             ready = multiprocessing.connection.wait([self.conn, self.process.sentinel], timeout)
             if not ready:
                 self.process.terminate()
@@ -72,7 +77,9 @@ class OptimizeJob:
             if self.conn not in ready and not self.conn.poll(0):
                 raise EOFError
             ok, value = self.conn.recv()
-        except (EOFError, OSError):
+            if self.cancelled:  # cancel() came as the result arrived
+                return None
+        except (EOFError, OSError, pickle.UnpicklingError):  # no result, or only part of one
             if self.cancelled:
                 return None
             raise RuntimeError('The optimizer stopped unexpectedly.') from None
