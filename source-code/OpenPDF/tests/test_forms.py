@@ -225,6 +225,10 @@ class FormFieldTests(unittest.TestCase):
             'empty.xfdf': b'',
             'cut off.xfdf': cut_off.encode(),
             'no fields.xml': b'<?xml version="1.0"?><note><full_name>Ada Lovelace</full_name></note>',
+            'database dump.xml': b'<mysqldump><database name="d"><table_data name="t"><row>'
+                                 b'<field name="full_name">Bob Stone</field></row></table_data></database></mysqldump>',
+            'web form.xml': b'<html><form><field name="full_name"><value>X</value></field></form></html>',
+            'records.xml': b'<records><field>full_name</field></records>',
             'not utf-8.xfdf': b'<?xml version="1.0" encoding="UTF-8"?><xfdf><fields><field name="full_name">'
                               b'<value>Ada \xff</value></field></fields></xfdf>',
         }

@@ -383,16 +383,15 @@ class PDF:
             tree = ET.parse(str(path))  # local, user-selected file
         except (ET.ParseError, ValueError, LookupError):  # not XML, cut off, or wrongly encoded
             raise ValueError('This is not an XFDF file.') from None
-        # An XFDF with no fields (an empty form's export) is valid; other XML without fields is not XFDF.
-        is_xfdf = local(tree.getroot().tag) == 'xfdf'
+        # The root element decides: other XML can hold <field> elements too (a database dump, a web form),
+        # and an XFDF with no fields (an empty form's export) is still XFDF.
+        if local(tree.getroot().tag) != 'xfdf':
+            raise ValueError('This is not an XFDF file.')
         values = {}
         for element in tree.iter():
-            is_xfdf = is_xfdf or local(element.tag) == 'field'
             if local(element.tag) == 'field' and element.get('name'):
                 value_el = next((c for c in element if local(c.tag) == 'value'), None)
                 values[element.get('name')] = (value_el.text or '') if value_el is not None else ''
-        if not is_xfdf:
-            raise ValueError('This is not an XFDF file.')
         applied = 0
         for page in self.doc:
             for w in (page.widgets() or []):
