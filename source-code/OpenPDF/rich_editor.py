@@ -435,7 +435,7 @@ class RichBoxEditor:
             self.close()
             self.app.render()
             return
-        before = self.app.pdf.bytes()
+        before = self.app.pdf.snapshot()
         try:
             put_box(self.app.pdf.doc, self.index, box)
         except Exception:
