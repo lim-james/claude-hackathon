@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 import fitz
 from PIL import Image
-from core import PDF, page_numbers, images_to_pdf
+from core import PDF, page_numbers, images_to_pdf, sanitize_status
 
 
 class PDFTests(unittest.TestCase):
@@ -103,9 +103,41 @@ class PDFTests(unittest.TestCase):
     def test_sanitize(self):
         self.pdf.doc.set_metadata({'author': 'Private'})
         self.pdf.doc.embfile_add('secret.txt', b'secret')
-        self.pdf.sanitize()
+        self.assertEqual(self.pdf.sanitize(), {'document': 1, 'pages': 0})
         self.assertFalse(self.pdf.doc.metadata['author'])
         self.assertEqual(self.pdf.doc.embfile_count(), 0)
+
+    def test_sanitize_removes_files_attached_to_pages(self):
+        payload = b'PAGE-ATTACHMENT payroll'
+        second = self.pdf.doc.new_page()
+        first = self.pdf.doc[0]
+        first.add_file_annot(fitz.Point(100, 100), payload, 'payroll.csv')
+        first.add_file_annot(fitz.Point(140, 100), payload, 'payroll.csv')  # same file twice
+        second.add_file_annot(fitz.Point(100, 100), payload, 'payroll.csv')
+        first.add_text_annot(fitz.Point(200, 200), 'Keep this note')
+        first.add_highlight_annot(first.search_for('public')[0])
+        self.pdf.doc.set_metadata({'author': 'Private'})
+        self.pdf.doc.embfile_add('budget.xlsx', b'DOCUMENT-LEVEL-ATTACHMENT')
+
+        self.assertEqual(self.pdf.sanitize(), {'document': 1, 'pages': 3})
+        output = self.root / 'clean.pdf'
+        self.pdf.save(output)
+        with fitz.open(output) as clean:
+            kinds = sorted(annot.type[1] for page in clean for annot in page.annots())
+            self.assertEqual(kinds, ['Highlight', 'Text'])
+            self.assertEqual(clean.embfile_count(), 0)
+            self.assertFalse(clean.metadata['author'])
+            streams = [clean.xref_stream(x) for x in range(1, clean.xref_length()) if clean.xref_is_stream(x)]
+            self.assertFalse(any(payload in stream for stream in streams))
+            self.assertFalse(any(b'DOCUMENT-LEVEL-ATTACHMENT' in stream for stream in streams))
+
+    def test_sanitize_status_names_only_what_was_removed(self):
+        self.assertEqual(sanitize_status({'document': 0, 'pages': 0}),
+                         'Document metadata removed. No attached files found.')
+        self.assertEqual(sanitize_status({'document': 1, 'pages': 0}),
+                         'Document metadata and 1 attached file(s) removed.')
+        self.assertEqual(sanitize_status({'document': 1, 'pages': 2}),
+                         'Document metadata and 3 attached file(s) removed (2 pinned to pages).')
 
     @unittest.skipUnless(shutil.which('tesseract'), 'Tesseract not on PATH')
     def test_ocr_searchable_output(self):

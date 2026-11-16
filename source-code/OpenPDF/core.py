@@ -179,8 +179,16 @@ class PDF:
     def sanitize(self):
         self.doc.set_metadata({})
         self.doc.del_xml_metadata()
-        for name in self.doc.embfile_names():
+        names = self.doc.embfile_names()
+        for name in names:
             self.doc.embfile_del(name)
+        # Files can also be pinned to a page as an annotation (the paperclip icon).
+        on_pages = 0
+        for page in self.doc:
+            for annot in list(page.annots(types=[fitz.PDF_ANNOT_FILE_ATTACHMENT])):
+                page.delete_annot(annot)
+                on_pages += 1
+        return {'document': len(names), 'pages': on_pages}
 
     def add_image(self, index, rect, path):
         self.doc[index].insert_image(rect, filename=str(path), keep_proportion=True)
@@ -531,6 +539,15 @@ class PDF:
             self.restore(out.tobytes())
         finally:
             out.close()
+
+
+def sanitize_status(removed):
+    """Status line for PDF.sanitize(): it names only what was removed."""
+    total = removed['document'] + removed['pages']
+    if not total:
+        return 'Document metadata removed. No attached files found.'
+    pinned = f" ({removed['pages']} pinned to pages)" if removed['pages'] else ''
+    return f'Document metadata and {total} attached file(s) removed{pinned}.'
 
 
 def images_to_pdf(paths, output):

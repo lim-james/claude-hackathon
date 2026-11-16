@@ -34,7 +34,7 @@ elif sys.stdout is None or sys.stderr is None:
 
 import fitz
 from PIL import Image, ImageTk
-from core import PDF, page_numbers, images_to_pdf, office_to_pdf
+from core import PDF, page_numbers, images_to_pdf, office_to_pdf, sanitize_status
 from text_tools import find_matches, replace_match, select_text, lines
 from box_tools import text_sections
 from inline_editor import InlineEditor
@@ -981,7 +981,9 @@ class App(tk.Tk):
 
     def sanitize(self):
         self.require()
-        self.change(self.pdf.sanitize, 'Document metadata and embedded file attachments removed.')
+        removed = {}
+        self.change(lambda: removed.update(self.pdf.sanitize()), 'Document metadata removed.')
+        self.status.set(sanitize_status(removed))
 
     def encrypt(self):
         self.require()
