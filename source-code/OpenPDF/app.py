@@ -1128,12 +1128,16 @@ class App(tk.Tk):
 
     def _restore_version(self, version_id):
         # Snapshot the current state first, and record an in-memory undo step, so
-        # a restore can be reversed.
-        data = read_version(self.path, version_id)
-        undo_step = self.pdf.bytes()
-        before = self.pdf.snapshot_bytes(self.password)
-        self.pdf.restore(data, self.password)  # raises, changing nothing, if it cannot be unlocked
-        save_version(self.path, before, 'Before restore')
+        # a restore can be reversed. The document is replaced last: a version that
+        # cannot be unlocked, or a snapshot that cannot be written, changes nothing.
+        replacement = PDF.unlocked(read_version(self.path, version_id), self.password)
+        try:
+            undo_step = self.pdf.bytes()
+            save_version(self.path, self.pdf.snapshot_bytes(self.password), 'Before restore')
+        except BaseException:
+            replacement.close()
+            raise
+        self.pdf.replace(replacement)
         self.history.append(undo_step)
         self.history = self.history[-8:]
         self.redo_history.clear()

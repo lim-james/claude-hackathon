@@ -1,8 +1,10 @@
+import errno
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 import fitz
 import versions
 from core import PDF
@@ -158,6 +160,37 @@ class ProtectedDocumentVersionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.pdf.compare(str(versions.version_file(self.doc_path, record['id'])),
                              str(Path(self.tmp.name) / 'diff.html'))
+
+    def assert_restore_changed_nothing(self, app):
+        self.assertIn('later edit', self.pdf.doc[0].get_text())
+        self.assertEqual((app.history, app.dirty), ([], False))
+        self.assertEqual([r['label'] for r in versions.list_versions(self.doc_path)], ['v1'])
+
+    def test_restore_changes_nothing_when_the_before_restore_snapshot_cannot_be_written(self):
+        from app import App
+        record = self.snapshot()
+        self.pdf.doc[0].insert_text((72, 144), 'later edit')
+        app = self.app(self.PASSWORD)
+        with patch('app.save_version', side_effect=OSError(errno.ENOSPC, 'No space left on device')):
+            with self.assertRaises(OSError):
+                App._restore_version(app, record['id'])
+        self.assert_restore_changed_nothing(app)
+
+    @unittest.skipIf(os.name == 'nt' or not hasattr(os, 'geteuid') or os.geteuid() == 0,
+                     'needs a folder this user cannot write to')
+    def test_restore_changes_nothing_when_the_history_folder_is_read_only(self):
+        from app import App
+        record = self.snapshot()
+        self.pdf.doc[0].insert_text((72, 144), 'later edit')
+        app = self.app(self.PASSWORD)
+        folder = versions.version_file(self.doc_path, record['id']).parent
+        os.chmod(folder, 0o555)
+        try:
+            with self.assertRaises(PermissionError):
+                App._restore_version(app, record['id'])
+        finally:
+            os.chmod(folder, 0o755)
+        self.assert_restore_changed_nothing(app)
 
     def test_unprotected_snapshots_still_restore_and_compare(self):
         # What an unprotected document saves, and what was saved before snapshots were encrypted.

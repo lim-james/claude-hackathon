@@ -61,15 +61,24 @@ class PDF:
         # compression belong to Save as, not every mouse gesture or edit.
         return self.doc.tobytes(garbage=0, deflate=False)
 
-    def restore(self, data, password=''):
-        # data is what bytes() or snapshot() returned. Open and unlock the
-        # replacement first, so a snapshot that cannot be read leaves the
-        # current document as it is.
-        base, tail = data if isinstance(data, tuple) else (data, b'')
-        doc = fitz.open(stream=base + tail if tail else base, filetype='pdf')
+    @staticmethod
+    def unlocked(data, password=''):
+        # Open and unlock a snapshot without touching any open document, so one
+        # that cannot be read leaves the current document as it is.
+        doc = fitz.open(stream=data, filetype='pdf')
         if doc.needs_pass and not doc.authenticate(password):
             doc.close()
             raise ValueError('Incorrect password.')
+        return doc
+
+    def restore(self, data, password=''):
+        # data is what bytes() or snapshot() returned.
+        base, tail = data if isinstance(data, tuple) else (data, b'')
+        self.replace(self.unlocked(base + tail if tail else base, password), base, tail)
+
+    def replace(self, doc, base=None, tail=b''):
+        # base + tail are the bytes doc was opened from, the undo base; without
+        # them the next snapshot() takes one full copy.
         self.doc.close()
         self.doc = doc
         self._base, self._tail, self._xrefs, self._changed, self._file = base, tail, self.doc.xref_length(), False, None
