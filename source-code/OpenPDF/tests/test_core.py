@@ -1,10 +1,13 @@
 import tempfile
 import shutil
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 import fitz
 from PIL import Image
-from core import PDF, page_numbers, images_to_pdf
+from core import PDF, layout_text, page_numbers, images_to_pdf
 
 
 class PDFTests(unittest.TestCase):
@@ -162,6 +165,108 @@ class PDFTests(unittest.TestCase):
         actual = displayed * page.derotation_matrix
         self.pdf.redact(0, actual)
         self.assertNotIn('123456', self.pdf.doc[0].get_text())
+
+
+class CompareTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def document(self, name, pages):
+        doc = fitz.open()
+        for lines in pages:
+            doc.new_page().insert_textbox((50, 50, 545, 790), '\n'.join(lines), fontsize=10)
+        doc.save(self.root / name)
+        doc.close()
+        return str(self.root / name)
+
+    def changed(self, report):
+        # What difflib marks as added, removed or changed, e.g. 'add">new text'.
+        html = Path(report).read_text(encoding='utf-8').replace('&nbsp;', ' ')
+        return sorted(part.split('</span>')[0] for part in html.split('<span class="diff_')[1:])
+
+    def test_layout_text_reads_columns_tables_and_gaps_as_sorted_text_does(self):
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((50, 60), 'Heading across the page', fontsize=14)
+        page.insert_textbox((50, 80, 290, 300), '\n'.join(f'left line {i} of the column' for i in range(6)), fontsize=10)
+        page.insert_textbox((310, 83, 545, 300), '\n'.join(f'right line {i}' for i in range(8)), fontsize=9)
+        for y, row in ((400, ('Name', 'Qty', 'Price')), (421.5, ('Widget', '3', '9.50'))):
+            for x, cell in zip((50, 200, 350), row):
+                page.insert_text((x, y + x / 200), cell, fontsize=11)
+        page.insert_text((300, 600), 'sideways note', rotate=90)
+        doc.new_page()  # no text
+        doc.new_page().insert_text((72, 700), 'last page')
+        for page in doc:
+            self.assertEqual(layout_text(page), page.get_text(sort=True))
+        rows = [line.split() for line in layout_text(doc[0]).splitlines()]
+        self.assertIn(['Widget', '3', '9.50'], rows)  # a table row stays one line
+        self.assertIn('left line 0 of the column right line 0'.split(), rows)
+        doc.close()
+
+    def test_compare_reports_the_edited_lines_and_only_those(self):
+        pages = [[f'page {p} line {n} stays the same' for n in range(30)] for p in range(3)]
+        original = self.document('original.pdf', pages)
+        pages[0][3] = 'page 0 line 3 was REWRITTEN'
+        pages[1].insert(10, 'an ADDED line')
+        del pages[2][20]
+        edited = self.document('edited.pdf', pages)
+        pdf = PDF(original)
+        try:
+            pdf.compare(edited, self.root / 'diff.html')
+            pdf.compare(original, self.root / 'same.html')
+        finally:
+            pdf.close()
+        marked = ' | '.join(self.changed(self.root / 'diff.html'))
+        for text in ('stays the same', 'was REWRITTEN', 'an ADDED line', 'page 2 line 20 stays the same'):
+            self.assertIn(text, marked)
+        self.assertEqual(len(self.changed(self.root / 'diff.html')), 4, marked)
+        self.assertEqual(self.changed(self.root / 'same.html'), [])
+
+    def test_compare_costs_less_than_one_sorted_read_of_each_document(self):
+        # Compare text read both documents with get_text(sort=True), 16 times the
+        # cost of reading the text. Measured against that read in the same
+        # process, so the check does not depend on the machine.
+        path = self.document('long.pdf', [[f'line {n} ' + 'word ' * 12 for n in range(46)]] * 8)
+        pdf = PDF(path)
+        try:
+            start = time.process_time()
+            for page in pdf.doc:
+                page.get_text(sort=True)
+            sorted_read = time.process_time() - start
+            start = time.process_time()
+            pdf.compare(path, self.root / 'diff.html')
+            compare = time.process_time() - start
+        finally:
+            pdf.close()
+        self.assertLess(compare, sorted_read, f'compare {compare:.2f} s, one sorted read {sorted_read:.2f} s')
+
+    def test_app_compare_runs_on_a_worker_copy_and_opens_the_report_when_done(self):
+        from app import App
+        pages = [['first line', 'second line']]
+        current = PDF(self.document('current.pdf', pages))
+        other = self.document('other.pdf', [['first line', 'CHANGED line']])
+        output = self.root / 'diff.html'
+        started, status = [], []
+        app = SimpleNamespace(pdf=current, status=SimpleNamespace(set=status.append),
+                              background=lambda work, done, message: started.append((work, done, message)))
+        try:
+            with patch('app.webbrowser.open') as browser:
+                App.compare_in_background(app, other, str(output))
+                (work, done, message), = started
+                self.assertEqual(message, 'Comparing text…')
+                self.assertFalse(output.exists())  # nothing compared on the calling (window) thread
+                current.doc[0].insert_text((72, 300), 'typed after the compare started')
+                done(work())
+                browser.assert_called_once_with(output.resolve().as_uri())
+        finally:
+            current.close()
+        self.assertEqual(self.changed(output), ['add">CHANGED line', 'sub">second line'])
+        self.assertNotIn('typed&nbsp;after', output.read_text(encoding='utf-8'))
+        self.assertIn('Text comparison opened', status[-1])
 
 
 if __name__ == '__main__':

@@ -32,6 +32,53 @@ def page_numbers(spec, count):
     return result
 
 
+def layout_text(page, tolerance=3):
+    """The page's text line by line as it is laid out: what
+    page.get_text(sort=True) returns, worked out on plain numbers. PyMuPDF
+    builds a Rect object for every word to do it, which made comparing a long
+    document take many times longer than reading its text."""
+    words = page.get_text('words')
+    if not words:
+        return ''
+
+    def rows(items):
+        # Consecutive words whose top or bottom is within `tolerance` of the
+        # row so far share a row.
+        row, top, bottom = [], 0, 0
+        for word in items:
+            if row and (abs(word[1] - top) <= tolerance or abs(word[3] - bottom) <= tolerance):
+                top, bottom = min(top, word[1]), max(bottom, word[3])
+            else:
+                if row:
+                    yield top, bottom, row
+                row, top, bottom = [], word[1], word[3]
+            row.append(word)
+        yield top, bottom, row
+
+    # Reading order first (top to bottom, left to right within a row), then
+    # rows again over that order: the same two passes PyMuPDF makes.
+    words.sort(key=lambda w: (w[3], w[0]))
+    ordered = [w for _, _, row in rows(words) for w in sorted(row, key=lambda w: w[0])]
+    margin = min(w[0] for w in words)
+    lines = []
+    for top, bottom, row in rows(ordered):
+        text, end = '', margin
+        for x0, _, x1, _, word, *_ in sorted(row, key=lambda w: w[0]):
+            # A horizontal gap becomes as many spaces as fit at this word's width.
+            gap = int(round((x0 - end) / (x1 - x0) * len(word))) if x1 > x0 else 0
+            text += ' ' * max(gap, 0 if (end == margin or x0 <= end) else 1) + word
+            end = x1
+        lines.append((top, bottom, text))
+    lines.sort(key=lambda line: line[1])
+    out, last = [lines[0][2]], lines[0][1]
+    for top, bottom, text in lines[1:]:
+        # A vertical gap becomes up to five blank lines.
+        gap = min(int(round((top - last) / (bottom - top))), 5) if bottom > top else 0
+        out.append('\n' * (gap + 1) + text)
+        last = bottom
+    return ''.join(out)
+
+
 class PDF:
     def __init__(self, path=None, password=''):
         self.doc = fitz.open(path) if path else fitz.open()
@@ -630,8 +677,8 @@ class PDF:
     def compare(self, other_path, output, password=''):
         other = PDF(other_path, password)
         try:
-            left = '\n'.join(p.get_text(sort=True) for p in self.doc).splitlines()
-            right = '\n'.join(p.get_text(sort=True) for p in other.doc).splitlines()
+            left = '\n'.join(layout_text(p) for p in self.doc).splitlines()
+            right = '\n'.join(layout_text(p) for p in other.doc).splitlines()
             result = difflib.HtmlDiff(wrapcolumn=80).make_file(
                 left, right, fromdesc='Current document', todesc=html.escape(Path(other_path).name))
             Path(output).write_text(result, encoding='utf-8')

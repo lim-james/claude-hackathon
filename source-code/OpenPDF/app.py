@@ -1122,9 +1122,23 @@ class App(tk.Tk):
         other = fd.askopenfilename(filetypes=[('PDF', '*.pdf')])
         path = self.output('.html') if other else None
         if path:
-            self.pdf.compare(other, path)
-            webbrowser.open(Path(path).resolve().as_uri())
+            self.compare_in_background(other, path)
+
+    def compare_in_background(self, other, output, password=''):
+        # A long document takes seconds to compare: work on a copy, off the
+        # window thread, so the window keeps responding.
+        snapshot = self.pdf.bytes()
+        def work():
+            worker = PDF()
+            try:
+                worker.restore(snapshot)
+                worker.compare(other, output, password)
+            finally:
+                worker.close()
+        def done(_):
+            webbrowser.open(Path(output).resolve().as_uri())
             self.status.set('Text comparison opened. Image/layout changes are not included; OCR scans first.')
+        self.background(work, done, 'Comparing text…')
 
     def _restore_version(self, version_id):
         # Snapshot the current state first, and record an in-memory undo step, so
@@ -1193,8 +1207,7 @@ class App(tk.Tk):
         def compare():
             item = selected()
             out = Path(tempfile.mkdtemp()) / 'version-diff.html'
-            self.pdf.compare(str(version_file(self.path, item['id'])), str(out), self.password)
-            webbrowser.open(out.resolve().as_uri())
+            self.compare_in_background(str(version_file(self.path, item['id'])), str(out), self.password)
         def delete():
             item = selected()
             delete_version(self.path, item['id'])
