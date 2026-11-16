@@ -896,10 +896,13 @@ class App(tk.Tk):
         def delete():
             item = rows.get(tree.focus())
             if item:
+                touched = set()  # the comment's page now; pages may have moved since the list was read
                 def remove():
-                    if not self.pdf.delete_annotation(item):
+                    page = self.pdf.delete_annotation(item)
+                    if page is None:
                         raise ValueError('That comment is no longer in the document.')
-                self.guard(lambda: self.change(remove, 'Annotation deleted.', dirty_pages={item['page']}))
+                    touched.add(page)
+                self.guard(lambda: self.change(remove, 'Annotation deleted.', dirty_pages=touched))
                 reload()
         tree.bind('<Double-Button-1>', goto)
         empty = tk.StringVar()

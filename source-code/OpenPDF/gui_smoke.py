@@ -434,6 +434,19 @@ def exercise_app(app):
     assert len(app.history) == steps, 'Stale comment row added an undo step'
     assert len(app.pdf.annotations()) == total - 2, 'Stale comment row removed another annotation'
     assert len(tree.get_children()) == total - 2, 'Comment list did not reload after a stale row'
+    # A page added in front moves every page number; the held row still deletes its own comment.
+    rows = tree.get_children()
+    tree.selection_set(rows[-1])
+    tree.focus(rows[-1])
+    chosen = identity(app.pdf.annotations()[-1])
+    app.pdf.doc.new_page(0)
+    delete_button.invoke()
+    app.update()
+    left = [identity(item) for item in app.pdf.annotations()]
+    assert len(left) == total - 3 and chosen not in left, 'Comment list lost a comment whose page number changed'
+    assert app.status.get() == 'Annotation deleted.' and len(app.history) == steps + 1, \
+        'Deleting a comment whose page number changed was not reported as done'
+    app.history.pop()
     app.pdf.restore(kept)
     app.refresh()
     for child in app.winfo_children():

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 
 import fitz
 from PIL import Image
@@ -262,43 +263,71 @@ class PDF:
     def annotations(self):
         # Every markup/shape/note/stamp/ink annotation across the document.
         items = []
+        listed = self._listed_comments()
         for index in range(len(self.doc)):
             page = self.doc[index]  # hold the page; annots die with their parent
             for place, annot in enumerate(page.annots()):
-                items.append(dict(self._annotation_row(annot), page=index, index=place, xref=annot.xref))
+                kind, text, author, _, _ = listed[index][1][place]
+                items.append({'page': index, 'kind': kind, 'text': text, 'author': author,
+                              'rect': tuple(annot.rect), 'xref': annot.xref, 'index': place, 'listed': listed})
         return items
 
+    def _listed_comments(self):
+        # Per page: a checksum of the page's content, and for each comment what
+        # identifies it across a save (type, text, author, position, name).
+        # Object numbers are left out; a save with garbage collection changes
+        # them. Pages without comments need no checksum.
+        def position(annot):
+            # The stored /Rect: unlike annot.rect it does not move when the page is rotated.
+            try:
+                stored = tuple(float(v) for v in self.doc.xref_get_key(annot.xref, 'Rect')[1].strip('[]').split())
+            except ValueError:
+                stored = ()
+            return stored if len(stored) == 4 else tuple(annot.rect)
+
+        pages = []
+        for index in range(len(self.doc)):
+            page = self.doc[index]
+            keys = tuple((annot.type[1], annot.info.get('content', '') or '',
+                          annot.info.get('title', '') or '', position(annot),
+                          annot.info.get('id', '') or '') for annot in page.annots())
+            pages.append((zlib.crc32(page.read_contents()) if keys else 0, keys))
+        return tuple(pages)
+
     @staticmethod
-    def _annotation_row(annot):
-        info = annot.info
-        return {'kind': annot.type[1], 'text': info.get('content', '') or '',
-                'author': info.get('title', '') or '', 'rect': tuple(annot.rect)}
+    def _same_comment(a, b):
+        return (a[:3] == b[:3] and a[4] == b[4]
+                and all(abs(x - y) < 0.01 for x, y in zip(a[3], b[3])))
 
     def delete_annotation(self, row):
-        # `row` is an item from annotations(), possibly held since before a save.
-        # Saving with garbage collection renumbers the open document, so the
-        # comment is found by its place on the page, checked against what the
-        # row says it is, and never by its object number.
-        if not 0 <= row['page'] < len(self.doc):
-            return False
-        page = self.doc[row['page']]
-        annots = list(page.annots())
+        """Delete the comment a row from annotations() stands for.
 
-        def same(annot):
-            found = self._annotation_row(annot)
-            return (all(found[key] == row[key] for key in ('kind', 'text', 'author'))
-                    and all(abs(a - b) < 0.01 for a, b in zip(found['rect'], row['rect'])))
-
-        place = row.get('index', -1)
-        if 0 <= place < len(annots) and same(annots[place]):
-            target = annots[place]
-        else:  # the page changed since the row was read: accept one exact match only
-            matches = [annot for annot in annots if same(annot)]
-            if len(matches) != 1:
-                return False
-            target = matches[0]
-        page.delete_annot(target)
-        return True
+        The row may have been held while the document was saved (which changes
+        object numbers) or edited. Returns the page the comment was deleted
+        from, or None when it is no longer in the document. Raises ValueError,
+        deleting nothing, when the row cannot be tied to exactly one comment.
+        """
+        same = self._same_comment
+        then, now = row['listed'], self._listed_comments()
+        if len(then) == len(now) and all(a[0] == b[0] and len(a[1]) == len(b[1]) and all(map(same, a[1], b[1]))
+                                         for a, b in zip(then, now)):
+            # No comment changed and no page with comments moved or changed
+            # since the row was read, so its place is exact, also among
+            # identical comments.
+            index, place = row['page'], row['index']
+        else:
+            key = then[row['page']][1][row['index']]
+            found = [(index, place) for index, (_, keys) in enumerate(now)
+                     for place, other in enumerate(keys) if same(key, other)]
+            if not found:
+                return None
+            if len(found) != 1 or sum(same(key, other) for _, keys in then for other in keys) != 1:
+                raise ValueError('The document changed and this row now fits more than one comment. '
+                                 'Nothing was deleted.')
+            index, place = found[0]
+        page = self.doc[index]
+        page.delete_annot(list(page.annots())[place])
+        return index
 
     # Supported interactive field types. Radio groups need a parent-field
     # structure PyMuPDF's add_widget does not build, so they are not offered yet.
