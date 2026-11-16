@@ -7,6 +7,7 @@ import JSZip from 'jszip';
 import type { Asset, Background, ChartElement, Deck, ImageElement, ShapeElement, SlideElement, TableElement, TextElement, Theme } from '../model/types';
 import { applyTokens, getLayout, resolveElement, slideBackground } from '../model/resolve';
 import { chartPalette, resolveColor, resolveFont, toHex } from '../model/theme';
+import { ptPerPx as slidePtPerPx, slideInches } from '../model/units';
 import { SlideView } from '../render/SlideView';
 import { chartColors } from '../render/ChartView';
 import { downloadBlob, safeFilename } from './deckfile';
@@ -19,11 +20,6 @@ function hex6(color: string | undefined, theme: Theme): string | undefined {
   if (!color || color === 'transparent') return undefined;
   const h = toHex(resolveColor(color, theme));
   return h ? h.slice(1).toUpperCase() : undefined;
-}
-
-function slideInches(deck: Deck) {
-  const { w, h } = deck.size;
-  return w >= h ? { inW: 13.333, inH: (13.333 * h) / w } : { inW: (13.333 * w) / h, inH: 13.333 };
 }
 
 interface RunBase {
@@ -227,7 +223,7 @@ const SHAPE_MAP: Record<string, string> = {
 
 export async function buildPptx(deck: Deck): Promise<PptxGenJS> {
   const pptx = new PptxGenJS();
-  const { inW, inH } = slideInches(deck);
+  const { inW, inH } = slideInches(deck.size);
   pptx.defineLayout({ name: 'DECKFORGE', width: inW, height: inH });
   pptx.layout = 'DECKFORGE';
   pptx.title = deck.title;
@@ -235,7 +231,7 @@ export async function buildPptx(deck: Deck): Promise<PptxGenJS> {
   pptx.theme = { headFontFace: deck.theme.fonts.heading, bodyFontFace: deck.theme.fonts.body };
   const theme = deck.theme;
   const k = inW / deck.size.w; // inches per slide px
-  const ptPerPx = k * 72;
+  const ptPerPx = slidePtPerPx(deck.size);
   const bakeCache = new Map<string, string>();
 
   for (let si = 0; si < deck.slides.length; si++) {
@@ -477,7 +473,7 @@ export async function exportPdf(deck: Deck) {
   const indices = deck.slides.map((_, i) => i).filter((i) => !deck.slides[i].hidden);
   const list = indices.length ? indices : deck.slides.map((_, i) => i);
   const urls = await renderSlides(deck, list, (n, css) => toJpeg(n, { width: deck.size.w, height: deck.size.h, pixelRatio: 1, quality: 0.92, fontEmbedCSS: css, backgroundColor: '#ffffff' }));
-  const { inW, inH } = slideInches(deck);
+  const { inW, inH } = slideInches(deck.size);
   const pw = inW * 72;
   const ph = inH * 72;
   const pdf = new jsPDF({ orientation: pw >= ph ? 'landscape' : 'portrait', unit: 'pt', format: [pw, ph], compress: true });
