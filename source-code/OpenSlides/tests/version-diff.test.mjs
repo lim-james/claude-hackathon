@@ -44,6 +44,41 @@ test('detects a moved slide without content change', () => {
   assert.ok(diff.summary.includes('2 moved'));
 });
 
+const five = () => deck(['s1', 's2', 's3', 's4', 's5'].map((id) => slide(id)));
+const movedIds = (d) => d.slides.filter((s) => s.status === 'moved').map((s) => s.id);
+
+test('adding or deleting one slide does not list the slides after it as moved', () => {
+  const from = five();
+  const at = (i, ...insert) => deck([...from.slides.slice(0, i), ...insert, ...from.slides.slice(i + (insert.length ? 0 : 1))]);
+  assert.equal(diffDecks(from, at(0, slide('new'))).summary, '1 added');
+  assert.equal(diffDecks(from, at(2, slide('new'))).summary, '1 added');
+  assert.equal(diffDecks(from, at(0)).summary, '1 removed');
+  assert.equal(diffDecks(from, at(2)).summary, '1 removed');
+});
+
+test('a swap next to a deleted slide reports only the swapped slides as moved', () => {
+  const from = five();
+  const [, s2, s3, s4, s5] = from.slides;
+  const diff = diffDecks(from, deck([s2, s3, s5, s4]));
+  assert.equal(diff.summary, '1 removed, 2 moved');
+  assert.deepEqual(movedIds(diff).sort(), ['s4', 's5']);
+});
+
+test('dragging the last slide to the front counts every shared slide as moved', () => {
+  const from = five();
+  const [s1, s2, s3, s4, s5] = from.slides;
+  assert.equal(diffDecks(from, deck([s5, s1, s2, s3, s4])).summary, '5 moved');
+});
+
+test('a slide that is moved and edited is reported as changed', () => {
+  const from = deck([slide('s1'), slide('s2')]);
+  const to = deck([slide('s2', [], { notes: 'edited' }), slide('s1')]);
+  const diff = diffDecks(from, to);
+  assert.equal(statusOf(diff, 's2'), 'changed');
+  assert.equal(statusOf(diff, 's1'), 'moved');
+  assert.equal(diff.summary, '1 changed, 1 moved');
+});
+
 test('describes a text edit with before and after', () => {
   const from = deck([slide('s1', [textEl('t1', 'Old title')])]);
   const to = deck([slide('s1', [textEl('t1', 'New title')])]);

@@ -153,6 +153,10 @@ export function diffDecks(from: Deck, to: Deck): DeckDiff {
   const toIndex = new Map(to.slides.map((s, i) => [s.id, i]));
   const fromById = new Map(from.slides.map((s) => [s.id, s]));
   const slides: SlideDiff[] = [];
+  // "Moved" compares a slide's rank among the slides both versions share, so
+  // adding or deleting a slide does not mark every slide after it as moved.
+  const fromRank = new Map(from.slides.filter((s) => toIndex.has(s.id)).map((s, i) => [s.id, i]));
+  let rank = 0;
 
   to.slides.forEach((slide, i) => {
     const prev = fromById.get(slide.id);
@@ -162,7 +166,8 @@ export function diffDecks(from: Deck, to: Deck): DeckDiff {
     }
     const changes = slideChanges(prev, slide);
     const fi = fromIndex.get(slide.id)!;
-    const status: SlideDiff['status'] = changes.length ? 'changed' : fi !== i ? 'moved' : 'unchanged';
+    const moved = fromRank.get(slide.id) !== rank++;
+    const status: SlideDiff['status'] = changes.length ? 'changed' : moved ? 'moved' : 'unchanged';
     slides.push({ id: slide.id, status, fromIndex: fi, toIndex: i, changes });
   });
   for (const slide of from.slides) {
