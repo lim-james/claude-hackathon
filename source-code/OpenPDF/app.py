@@ -142,6 +142,19 @@ class App(tk.Tk):
         self.refresh()
         self.status.set(f'Opened {Path(path).name}. Drag to select text; switch to Select area for placement/cropping.')
 
+    def ask_password(self, path):
+        # For a file a tool is about to read. Window thread only: it may open a
+        # dialog. '' for an unprotected file, which is not asked about.
+        if not PDF.locked(path):
+            return ''
+        name = Path(path).name
+        password = sd.askstring('Password', f'Password for {name}:', show='*', parent=self)
+        if password is None:
+            raise ValueError(f'{name} is password-protected and was not opened: no password was given.')
+        if PDF.locked(path, password):
+            raise ValueError(f'{name} was not opened: that is not its password.')
+        return password
+
     def open(self):
         if not self.confirm_discard():
             return
@@ -513,7 +526,8 @@ class App(tk.Tk):
         self.require()
         paths = fd.askopenfilenames(filetypes=[('PDF', '*.pdf')])
         if paths:
-            self.change(lambda: self.pdf.merge(paths))
+            passwords = {path: self.ask_password(path) for path in paths}
+            self.change(lambda: self.pdf.merge(paths, passwords))
 
     def select(self):
         self.require()
@@ -1120,9 +1134,10 @@ class App(tk.Tk):
     def compare(self):
         self.require()
         other = fd.askopenfilename(filetypes=[('PDF', '*.pdf')])
+        password = self.ask_password(other) if other else ''
         path = self.output('.html') if other else None
         if path:
-            self.compare_in_background(other, path)
+            self.compare_in_background(other, path, password)
 
     def compare_in_background(self, other, output, password=''):
         # A long document takes seconds to compare: work on a copy, off the
@@ -1246,15 +1261,20 @@ class App(tk.Tk):
         targets = [Path(folder) / (Path(p).stem + '-compressed.pdf') for p in paths]
         if len(set(targets)) != len(targets) or any(p.exists() for p in targets):
             raise ValueError('Output names overlap or already exist. Choose unique filenames and a new folder.')
-        def work():
-            for path, target in zip(paths, targets):
-                pdf = PDF(path)
-                try:
-                    pdf.save(target)
-                finally:
-                    pdf.close()
-            return len(paths)
-        self.background(work, lambda n: self.status.set(f'Compressed {n} PDFs. Already optimized files may not shrink.'), 'Compressing PDFs…')
+        passwords, refused = {}, []
+        for path in paths:  # ask here: no dialog may open from the worker thread
+            try:
+                passwords[path] = self.ask_password(path)
+            except ValueError:
+                refused.append(path)
+        chosen = [(path, target) for path, target in zip(paths, targets) if path not in refused]
+        def done(result):
+            written, skipped = result
+            names = ', '.join(Path(p).name for p in refused + skipped)
+            self.status.set(f'Compressed {len(written)} PDFs. Already optimized files may not shrink.'
+                            + (f' Skipped: {names}.' if names else ''))
+        self.background(lambda: PDF.compress_files(*zip(*chosen), passwords) if chosen else ([], []),
+                        done, 'Compressing PDFs…')
 
     def optimize(self):
         self.require()

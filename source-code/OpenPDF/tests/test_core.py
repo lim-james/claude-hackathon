@@ -269,6 +269,136 @@ class CompareTests(unittest.TestCase):
         self.assertIn('Text comparison opened', status[-1])
 
 
+class ProtectedFileToolTests(unittest.TestCase):
+    # Compare text, Merge and Batch compress given a password-protected file.
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.paths = [self.make('appendix.pdf', 'Appendix'),
+                      self.make('contract.pdf', 'Signed contract', user_pw='hunter2', owner_pw='boss',
+                                encryption=fitz.PDF_ENCRYPT_AES_256, permissions=fitz.PDF_PERM_PRINT),
+                      self.make('report.pdf', 'Quarterly report')]
+        self.contract = self.paths[1]
+        self.out = self.root / 'out'
+        self.out.mkdir()
+        self.targets = [self.out / (Path(p).stem + '-compressed.pdf') for p in self.paths]
+        self.pdf = PDF(self.paths[2])
+        self.status = []
+
+    def tearDown(self):
+        self.pdf.close()
+        self.tmp.cleanup()
+
+    def make(self, name, text, **encryption):
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 72), text)
+        doc.save(self.root / name, **encryption)
+        doc.close()
+        return str(self.root / name)
+
+    def app(self, typed, **parts):
+        # The window's methods on a stand-in, with `typed` as what the user
+        # enters in the password dialog (None: Cancel).
+        from app import App
+        app = SimpleNamespace(pdf=self.pdf, require=lambda: None, status=SimpleNamespace(set=self.status.append), **parts)
+        app.ask_password = lambda path: App.ask_password(app, path)
+        return App, app, patch('app.sd.askstring', return_value=typed)
+
+    def test_merge_with_the_password_adds_the_pages_and_without_it_adds_none(self):
+        for passwords in (None, {self.contract: 'wrong'}):
+            with self.assertRaises(ValueError):
+                self.pdf.merge(self.paths[:2], passwords)
+            self.assertEqual(len(self.pdf.doc), 1)  # appendix.pdf was not added either
+        self.pdf.merge(self.paths[:2], {self.contract: 'hunter2'})
+        self.assertEqual([page.get_text().strip() for page in self.pdf.doc],
+                         ['Quarterly report', 'Appendix', 'Signed contract'])
+
+    def test_compare_with_the_password_writes_the_report_and_without_it_writes_nothing(self):
+        report = self.root / 'diff.html'
+        for password in ('', 'wrong'):
+            with self.assertRaises(ValueError):
+                self.pdf.compare(self.contract, report, password)
+            self.assertFalse(report.exists())
+        self.pdf.compare(self.contract, report, 'hunter2')
+        self.assertIn('Signed', report.read_text(encoding='utf-8'))
+
+    def test_batch_compress_keeps_the_password_and_restrictions_of_a_protected_file(self):
+        written, skipped = PDF.compress_files(self.paths, self.targets, {self.contract: 'hunter2'})
+        self.assertEqual((written, skipped), (self.targets, []))
+        for target in (self.targets[0], self.targets[2]):
+            with fitz.open(target) as copy:
+                self.assertFalse(copy.needs_pass)
+        with fitz.open(self.targets[1]) as copy:
+            self.assertTrue(copy.needs_pass)
+            self.assertFalse(copy.authenticate(''))
+            self.assertFalse(copy.authenticate('boss'))  # the old permissions password is not carried over
+            self.assertEqual(copy.authenticate('hunter2'), 2)  # opens, without owner rights
+            self.assertEqual(copy[0].get_text().strip(), 'Signed contract')
+            everything = PDF.permission_mask(key for key, _label, _flags in PDF.PERMISSIONS)
+            self.assertEqual(copy.permissions & everything, fitz.PDF_PERM_PRINT)
+
+    def test_batch_compress_skips_a_file_it_cannot_open_and_compresses_the_rest(self):
+        written, skipped = PDF.compress_files(self.paths, self.targets, {self.contract: 'wrong'})
+        self.assertEqual((written, skipped), ([self.targets[0], self.targets[2]], [self.contract]))
+        # Nothing is left behind for contract.pdf, so a rerun on it alone is not refused.
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ['appendix-compressed.pdf', 'report-compressed.pdf'])
+
+    def test_only_a_protected_file_is_asked_about_and_the_prompt_and_refusal_name_it(self):
+        App, app, dialog = self.app('hunter2')
+        with dialog as ask:
+            self.assertEqual(App.ask_password(app, self.paths[0]), '')
+            ask.assert_not_called()
+            self.assertEqual(App.ask_password(app, self.contract), 'hunter2')
+            self.assertEqual(ask.call_args.args[1], 'Password for contract.pdf:')
+        for typed in (None, 'wrong', ''):
+            App, app, dialog = self.app(typed)
+            with dialog, self.assertRaisesRegex(ValueError, 'contract.pdf'):
+                App.ask_password(app, self.contract)
+
+    def test_app_merge_asks_first_and_a_refusal_leaves_no_undo_step(self):
+        changes = []
+        for typed, steps in ((None, 0), ('wrong', 0), ('hunter2', 1)):
+            App, app, dialog = self.app(typed, change=lambda operation: (changes.append(1), operation()))
+            with dialog, patch('app.fd.askopenfilenames', return_value=tuple(self.paths[:2])):
+                try:
+                    App.merge(app)
+                except ValueError as refusal:
+                    self.assertIn('contract.pdf', str(refusal))
+            self.assertEqual(len(changes), steps, typed)
+        self.assertEqual(len(self.pdf.doc), 3)
+
+    def test_app_compare_asks_before_the_report_is_named_and_passes_the_password_on(self):
+        started, named = [], []
+        for typed in (None, 'hunter2'):
+            App, app, dialog = self.app(typed, output=lambda ext: named.append(ext) or str(self.root / 'diff.html'),
+                                        compare_in_background=lambda *args: started.append(args))
+            with dialog, patch('app.fd.askopenfilename', return_value=self.contract):
+                try:
+                    App.compare(app)
+                except ValueError as refusal:
+                    self.assertIn('contract.pdf', str(refusal))
+                    self.assertEqual((named, started), ([], []))
+        self.assertEqual(started, [(self.contract, str(self.root / 'diff.html'), 'hunter2')])
+
+    def test_app_batch_asks_before_the_worker_starts_and_names_the_file_it_skipped(self):
+        for typed, count, note in ((None, 2, ' Skipped: contract.pdf.'), ('hunter2', 3, '')):
+            started = []
+            App, app, dialog = self.app(typed, background=lambda work, done, message: started.append((work, done)))
+            folder = self.root / f'batch-{count}'
+            folder.mkdir()
+            with dialog as ask, patch('app.fd.askopenfilenames', return_value=tuple(self.paths)), \
+                    patch('app.fd.askdirectory', return_value=str(folder)):
+                App.batch(app)
+                (work, done), = started
+                ask.assert_called_once()  # before the worker; unprotected files are not asked about
+                done(work())
+                ask.assert_called_once()
+            self.assertEqual(len(list(folder.iterdir())), count)
+            self.assertEqual(self.status[-1], f'Compressed {count} PDFs. Already optimized files may not shrink.{note}')
+        with fitz.open(folder / 'contract-compressed.pdf') as copy:
+            self.assertTrue(copy.needs_pass)
+
+
 if __name__ == '__main__':
     unittest.main()
 

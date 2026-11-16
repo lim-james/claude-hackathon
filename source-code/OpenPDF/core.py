@@ -5,6 +5,7 @@ import difflib
 import html
 import io
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -99,6 +100,12 @@ class PDF:
     def _signature(path):
         stat = os.stat(path)
         return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+    @staticmethod
+    def locked(path, password=''):
+        # True when the file needs a password and the given one does not open it.
+        with fitz.open(path) as probe:
+            return bool(probe.needs_pass and not probe.authenticate(password))
 
     def close(self):
         self.doc.close()
@@ -310,13 +317,45 @@ class PDF:
         self._atomic_write(path, data)
         return len(data)
 
-    def merge(self, paths):
-        for path in paths:
-            source = PDF(path)
-            try:
+    def merge(self, paths, passwords=None):
+        # Open every source before adding a page, so one that cannot be opened
+        # leaves this document as it was.
+        passwords = passwords or {}
+        sources = []
+        try:
+            for path in paths:
+                sources.append(PDF(path, passwords.get(path, '')))
+            for source in sources:
                 self.doc.insert_pdf(source.doc)
-            finally:
+        finally:
+            for source in sources:
                 source.close()
+
+    @staticmethod
+    def compress_files(paths, targets, passwords=None):
+        # Batch compress. A protected file is written protected again: with the
+        # password that opened it and the restrictions it had. A file that cannot
+        # be compressed is skipped and the rest still run.
+        passwords = passwords or {}
+        everything = PDF.permission_mask(key for key, _label, _flags in PDF.PERMISSIONS)
+        written, skipped = [], []
+        for path, target in zip(paths, targets):
+            password = passwords.get(path, '')
+            try:
+                pdf = PDF(path, password)
+                try:
+                    permissions = pdf.doc.permissions
+                    restricted = permissions & everything != everything
+                    # Restrictions only bind when the owner password differs from
+                    # the open password; the original owner password is unknown.
+                    pdf.save(target, password, owner_password=secrets.token_urlsafe(18) if restricted else '',
+                             permissions=permissions)
+                finally:
+                    pdf.close()
+                written.append(target)
+            except Exception:
+                skipped.append(path)
+        return written, skipped
 
     def select(self, spec):
         self.doc.select(page_numbers(spec, len(self.doc)))
