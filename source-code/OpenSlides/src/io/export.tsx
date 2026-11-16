@@ -10,6 +10,7 @@ import { chartPalette, resolveColor, resolveFont, toHex } from '../model/theme';
 import { SlideView } from '../render/SlideView';
 import { chartColors } from '../render/ChartView';
 import { downloadBlob, safeFilename } from './deckfile';
+import { xmlSafe } from './xmlText';
 
 // ---------------------------------------------------------------------------
 // PowerPoint export: real text boxes, shapes, native charts and tables.
@@ -38,12 +39,14 @@ interface RunBase {
 /** Converts our rich-text HTML into PptxGenJS text runs, keeping bold/italic/colour/size and bullets. */
 export function htmlToRuns(html: string, base: RunBase, ptPerPx: number, theme: Theme, align: string): PptxGenJS.TextProps[] {
   const root = document.createElement('div');
-  root.innerHTML = sanitizeHtml(html);
+  // A pasted vertical tab (PowerPoint's soft line break) or form feed would make the slide's XML invalid:
+  // each becomes a line break. xmlSafe below drops whatever else XML cannot carry.
+  root.innerHTML = sanitizeHtml(html).replace(/[\v\f]/g, '<br>');
   const paragraphs: { runs: PptxGenJS.TextProps[]; para: Record<string, unknown> }[] = [];
 
   const walk = (node: Node, style: RunBase & { strike: boolean }, out: PptxGenJS.TextProps[]) => {
     if (node.nodeType === 3) {
-      const text = (node.textContent ?? '').replace(/ /g, ' ');
+      const text = xmlSafe(node.textContent ?? '').replace(/ /g, ' ');
       if (text) {
         out.push({
           text,
@@ -230,7 +233,7 @@ export async function buildPptx(deck: Deck): Promise<PptxGenJS> {
   const { inW, inH } = slideInches(deck);
   pptx.defineLayout({ name: 'DECKFORGE', width: inW, height: inH });
   pptx.layout = 'DECKFORGE';
-  pptx.title = deck.title;
+  pptx.title = xmlSafe(deck.title);
   pptx.company = 'Made with OpenSlides';
   pptx.theme = { headFontFace: deck.theme.fonts.heading, bodyFontFace: deck.theme.fonts.body };
   const theme = deck.theme;
@@ -266,11 +269,11 @@ export async function buildPptx(deck: Deck): Promise<PptxGenJS> {
           data = await bakeImage(asset, el);
           bakeCache.set(key, data);
         }
-        s.addImage({ data, ...pos, altText: el.alt || undefined, transparency } as PptxGenJS.ImageProps);
+        s.addImage({ data, ...pos, altText: xmlSafe(el.alt ?? '') || undefined, transparency } as PptxGenJS.ImageProps);
       } else if (el.type === 'chart') addChart(pptx, s, el, pos, theme, ptPerPx);
       else if (el.type === 'table') addTable(s, el, pos, theme, ptPerPx);
     }
-    if (slide.notes) s.addNotes(slide.notes);
+    if (slide.notes) s.addNotes(xmlSafe(slide.notes));
   }
   return pptx;
 }
@@ -340,7 +343,8 @@ function addChart(pptx: PptxGenJS, s: PptxGenJS.Slide, el: ChartElement, pos: Po
   };
   const isPie = el.chartType === 'pie' || el.chartType === 'doughnut';
   const series = isPie ? el.data.series.slice(0, 1) : el.data.series;
-  const data = series.map((sr) => ({ name: sr.name, labels: el.data.labels, values: el.data.labels.map((_, i) => sr.values[i] ?? 0) }));
+  const labels = el.data.labels.map(xmlSafe);
+  const data = series.map((sr) => ({ name: xmlSafe(sr.name), labels, values: el.data.labels.map((_, i) => sr.values[i] ?? 0) }));
   const colors = chartColors(el, theme).map((c) => (toHex(c) ?? '#000000').slice(1).toUpperCase());
   const text = hex6(el.textColor, theme) ?? '333333';
   const fs = Math.max(6, Math.round(el.fontSize * ptPerPx * 0.85));
@@ -361,7 +365,7 @@ function addChart(pptx: PptxGenJS, s: PptxGenJS.Slide, el: ChartElement, pos: Po
     legendColor: text,
     legendFontFace: face,
     showTitle: !!el.title,
-    title: el.title || undefined,
+    title: xmlSafe(el.title ?? '') || undefined,
     titleFontSize: Math.round(fs * 1.15),
     titleColor: text,
     titleFontFace: face,
@@ -381,7 +385,7 @@ function addChart(pptx: PptxGenJS, s: PptxGenJS.Slide, el: ChartElement, pos: Po
     lineSize: 2,
     lineDataSymbolSize: 6,
     holeSize: 55,
-    altText: el.alt || el.title || undefined,
+    altText: xmlSafe(el.alt || el.title || '') || undefined,
   } as PptxGenJS.IChartOpts);
 }
 
@@ -394,7 +398,7 @@ function addTable(s: PptxGenJS.Slide, el: TableElement, pos: Pos, theme: Theme, 
     const stripe = !header && st.stripe && ri % 2 === (el.headerRow ? 0 : 1);
     const fill = header ? hex6(st.headerFill, theme) : stripe ? hex6(st.stripeFill, theme) : hex6(st.fill, theme);
     return Array.from({ length: cols }, (_, ci) => ({
-      text: r[ci] ?? '',
+      text: xmlSafe(r[ci] ?? ''),
       options: {
         bold: header,
         color: header ? hex6(st.headerColor, theme) : hex6(st.color, theme),

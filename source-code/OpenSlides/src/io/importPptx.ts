@@ -24,8 +24,10 @@ const desc = (el: Element | Document | null | undefined, name: string): Element[
 const at = (el: Element | undefined, name: string) => el?.getAttribute(name) ?? null;
 const num = (v: string | null, d = 0) => (v === null || v === '' || Number.isNaN(+v) ? d : +v);
 
-function parseXml(s: string): Document {
-  return new DOMParser().parseFromString(s, 'application/xml');
+/** Null when the part is not well-formed XML: the browser then returns an error document, which would read as an empty part. */
+function parseXml(s: string): Document | null {
+  const doc = new DOMParser().parseFromString(s, 'application/xml');
+  return doc.getElementsByTagName('parsererror').length ? null : doc;
 }
 
 function resolvePath(dir: string, target: string): string {
@@ -456,7 +458,8 @@ async function convertShape(el: Element, parts: SlideParts, ctx: Ctx, xf: Xform,
       const rid = desc(data, 'chart')[0]?.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id');
       const rel = rid ? parts.rels.get(rid) : undefined;
       const xml = rel ? await ctx.zip.file(rel.target)?.async('string') : undefined;
-      const chart = xml ? readChart(parseXml(xml), ctx.scheme) : null;
+      const chartDoc = xml ? parseXml(xml) : null;
+      const chart = chartDoc ? readChart(chartDoc, ctx.scheme) : null;
       if (chart) {
         out.push(makeChart(chart.type, base.x, base.y, base.w, base.h, { data: chart.data, title: chart.title, showLegend: chart.legend, colors: chart.colors, showValues: chart.showValues, fontSize: Math.round(14 * ctx.pxPerPt) }));
       } else ctx.skipped.add('some charts');
@@ -622,6 +625,7 @@ export async function importPptx(file: File): Promise<ImportReport> {
   const presXml = await zip.file(presPath)?.async('string');
   if (!presXml) throw new Error(`${file.name} has no slides part, so it isn’t a PowerPoint presentation.`);
   const pres = parseXml(presXml);
+  if (!pres) throw new Error(`${file.name} is damaged: its list of slides can’t be read. Re-save it from PowerPoint and try again.`);
   const presRels = await readRels(zip, presPath);
   const sz = desc(pres, 'sldSz')[0];
   const cx = num(at(sz, 'cx'), 12192000);
@@ -676,10 +680,14 @@ export async function importPptx(file: File): Promise<ImportReport> {
     const xml = await zip.file(path)?.async('string');
     if (!xml) continue;
     const slideDoc = parseXml(xml);
+    if (!slideDoc) {
+      ctx.skipped.add(`slide ${slidePaths.indexOf(path) + 1} (its content is damaged and can’t be read)`);
+      continue;
+    }
     const rels = await readRels(zip, path);
     const layoutRel = relByType(rels, '/slideLayout');
     const layoutXml = layoutRel ? await zip.file(layoutRel.target)?.async('string') : undefined;
-    const layoutDoc = layoutXml ? parseXml(layoutXml) : undefined;
+    const layoutDoc = (layoutXml && parseXml(layoutXml)) || undefined;
     let masterDoc: Document | undefined;
     let masterRels = new Map<string, Rel>();
     let layoutRels = new Map<string, Rel>();
@@ -688,7 +696,7 @@ export async function importPptx(file: File): Promise<ImportReport> {
       const mRel = relByType(layoutRels, '/slideMaster');
       const mXml = mRel ? await zip.file(mRel.target)?.async('string') : undefined;
       if (mXml && mRel) {
-        masterDoc = parseXml(mXml);
+        masterDoc = parseXml(mXml) ?? undefined;
         masterRels = await readRels(zip, mRel.target);
       }
     }
@@ -745,6 +753,7 @@ export async function importPptx(file: File): Promise<ImportReport> {
     };
     deck.slides.push(slide);
   }
+  if (!deck.slides.length) throw new Error(`${file.name} is damaged: none of its slides can be read. Re-save it from PowerPoint and try again.`);
   deck.assets = ctx.assets;
   return { deck, skipped: [...ctx.skipped] };
 }
