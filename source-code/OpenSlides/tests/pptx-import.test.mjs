@@ -164,7 +164,7 @@ test('colour adjustments: luminance, tint, shade, scheme aliases, system and pre
   const shapes =
     box(fill('FF0000', '<a:lumMod val="50000"/>')) +
     box(fill('000000', '<a:lumMod val="75000"/><a:lumOff val="25000"/>')) +
-    box(fill('000000', '<a:tint val="50000"/>')) +
+    box(fill('000000', '<a:tint val="25000"/>')) +
     box(fill('FFFFFF', '<a:shade val="50000"/>')) +
     box('<a:solidFill><a:schemeClr val="bg2"/></a:solidFill>') +
     box('<a:solidFill><a:schemeClr val="bg1"><a:lumMod val="50000"/></a:schemeClr></a:solidFill>') +
@@ -174,7 +174,7 @@ test('colour adjustments: luminance, tint, shade, scheme aliases, system and pre
     box('<a:solidFill><a:prstClr val="papayaWhip"/></a:solidFill>') +
     box('<a:solidFill><a:schemeClr val="hlink"/></a:solidFill>');
   const { els } = await importSlide(shapes);
-  assert.deepEqual(els.map((e) => e.fill), ['#800000', '#404040', '#808080', '#808080', '#eeece1', '#808080', '#336699', '#008000', '#0000ff']);
+  assert.deepEqual(els.map((e) => e.fill), ['#800000', '#404040', '#bfbfbf', '#808080', '#eeece1', '#808080', '#336699', '#008000', '#0000ff']);
 });
 
 test('connectors become lines or arrows running between their true end points', async () => {

@@ -115,8 +115,8 @@ test('each slide keeps its background, hidden flag, notes and order', async () =
   const [a, b, c] = [await out.slide(1), await out.slide(2), await out.slide(3)];
   assert.deepEqual([a, b, c].map((s) => val(one(s, 'bgPr'), 'srgbClr')), ['102030', '3A86FF', 'EDEDED'], 'theme colours are resolved; no background means the layout’s');
   assert.deepEqual([a, b, c].map((s) => s.documentElement.getAttribute('show')), [null, '0', null]);
-  assert.match((await out.part('ppt/notesSlides/notesSlide1.xml')).textContent, /Open with the numbers\./);
-  assert.doesNotMatch((await out.part('ppt/notesSlides/notesSlide2.xml')).textContent, /Open with/);
+  const notesOf = async (n) => Array.from(all(await out.part(`ppt/notesSlides/notesSlide${n}.xml`), 'sp')).find((sp) => val(sp, 'ph', 'type') === 'body').textContent;
+  assert.deepEqual([await notesOf(1), await notesOf(2), await notesOf(3)], ['Open with the numbers.', '', ''], 'a slide without notes exports an empty notes body');
 });
 
 test('text boxes keep position, rotation, type, alignment, padding, fill and slide tokens', async () => {
@@ -248,7 +248,7 @@ test('a deck exported to .pptx imports back with the same content', async () => 
   const back = report.deck;
   assert.deepEqual([back.title, back.size, back.slides.length], ['Round trip', deck.size, 2]);
   const [first, second] = back.slides;
-  assert.deepEqual([first.background, first.notes, first.hidden, second.hidden], [{ kind: 'solid', color: '#102030' }, 'Speaker notes', true, undefined]);
+  assert.deepEqual([first.background, first.notes, first.hidden, second.notes, second.hidden], [{ kind: 'solid', color: '#102030' }, 'Speaker notes', true, '', undefined]);
   const [t, ellipse, arrow, chart, table] = first.elements;
   assert.deepEqual(first.elements.map((e) => e.type), ['text', 'shape', 'shape', 'chart', 'table']);
   assert.equal(t.html, '<p>Hello <span style="font-weight: bold">bold</span> <span style="font-size: 80px; color: #ff0000">red</span></p><ul><li>one</li><li>two</li><li style="margin-left: 1.2em">deep</li></ul>');
