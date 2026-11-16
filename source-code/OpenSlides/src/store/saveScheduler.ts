@@ -36,6 +36,9 @@ export function createSaveScheduler<D extends { id: string }>(opts: SaveSchedule
 
   // Newest unsaved object per deck id, so a deck is always written under its own id.
   const pending = new Map<string, D>();
+  // Decks whose last write failed and that were not edited since. They stay pending and are
+  // retried with the next write, but they neither set a timer nor hold up another deck.
+  const failed = new Set<string>();
   let saved: D | null = null;
   let timer: unknown = null;
   let running: Promise<void> | null = null;
@@ -47,9 +50,12 @@ export function createSaveScheduler<D extends { id: string }>(opts: SaveSchedule
     timer = null;
   };
 
+  const retryable = () => [...pending.keys()].some((id) => !failed.has(id));
+
   const schedule = () => {
-    if (timer !== null || running || !pending.size) return;
-    const wait = Math.max(delay, lastStart + minInterval - now());
+    if (timer !== null || running || !retryable()) return;
+    // Capped at minInterval: now() is the system clock, which can be set back.
+    const wait = Math.max(delay, Math.min(minInterval, lastStart + minInterval - now()));
     timer = setTimer(() => {
       timer = null;
       void start().catch(() => {});
@@ -65,27 +71,44 @@ export function createSaveScheduler<D extends { id: string }>(opts: SaveSchedule
   };
 
   // One write at a time. A change that arrives during a write is written by the next one.
+  // A run writes every pending deck once (all of them until nothing is left when draining);
+  // a deck whose write fails does not stop the others.
   const run = async () => {
+    const attempted = new Set<string>();
+    const failedNow = new Set<string>();
+    let error: { cause: unknown } | null = null;
+    const next = () => {
+      const ids = [...pending.keys()].filter((id) => !failedNow.has(id) && (drain || !attempted.has(id)));
+      return ids.find((id) => !failed.has(id)) ?? ids[0]; // decks that failed before go last
+    };
     try {
-      do {
-        const [id, deck] = pending.entries().next().value as [string, D];
+      for (let id = next(); id !== undefined; id = next()) {
+        const deck = pending.get(id) as D;
         pending.delete(id);
+        attempted.add(id);
         lastStart = now();
         try {
           await attempt(deck);
-        } catch (err) {
-          if (!pending.has(id)) pending.set(id, deck); // still unsaved: the next change or flush retries
-          opts.onStatus('error');
-          throw err;
+          failed.delete(id);
+          saved = deck;
+        } catch (cause) {
+          failedNow.add(id);
+          error ??= { cause };
+          // Still unsaved: the next change or flush retries. A newer edit is retried on the timer.
+          if (!pending.has(id)) {
+            pending.set(id, deck);
+            failed.add(id);
+          }
         }
-        saved = deck;
-      } while (drain && pending.size);
+      }
     } finally {
       running = null;
       drain = false;
     }
-    if (pending.size) schedule();
-    else opts.onStatus('saved');
+    if (error) opts.onStatus('error');
+    else if (!pending.size) opts.onStatus('saved');
+    schedule();
+    if (error) throw error.cause;
   };
 
   const start = (): Promise<void> => {
@@ -97,8 +120,9 @@ export function createSaveScheduler<D extends { id: string }>(opts: SaveSchedule
   return {
     change(deck) {
       if (deck === saved && !pending.size) return;
-      const other = [...pending.keys()].some((id) => id !== deck.id);
+      const other = [...pending.keys()].some((id) => id !== deck.id && !failed.has(id));
       pending.set(deck.id, deck);
+      failed.delete(deck.id);
       opts.onStatus('saving');
       if (other) {
         // The previous deck still has unsaved edits: write it now, under its own id.

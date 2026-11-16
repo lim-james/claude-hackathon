@@ -119,3 +119,43 @@ test('flush writes pending edits at once and nothing when all is saved', async (
   await advance(2000);
   assert.equal(writes.length, 1, 'the flushed edit is not written again');
 });
+
+test('a system clock set back does not postpone the next save', async (t) => {
+  const { scheduler, writes, advance } = setup(t);
+  t.mock.timers.tick(700_000); // the mocked clock starts at 0
+  scheduler.change({ id: 'a', n: 1 });
+  await scheduler.flush();
+  t.mock.timers.setTime(Date.now() - 600_000); // moves the clock only; timers do not fire
+  scheduler.change({ id: 'a', n: 2 });
+  await advance(1000);
+  assert.deepEqual(writes.map((w) => w.deck.n), [1, 2]);
+});
+
+test('a deck whose write keeps failing does not hold up another deck', async (t) => {
+  const attempts = [];
+  const { scheduler, statuses, advance } = setup(t, async (deck) => {
+    attempts.push({ key: `${deck.id}${deck.n}`, at: Date.now() });
+    if (deck.id === 'a') throw new Error('storage full');
+  });
+  const keys = () => attempts.map((w) => w.key);
+  scheduler.change({ id: 'a', n: 1 });
+  await advance(500);
+  scheduler.open({ id: 'b', n: 0 });
+  await settle();
+  assert.deepEqual(keys(), ['a1', 'a1']);
+  scheduler.change({ id: 'b', n: 1 });
+  await advance(1100);
+  assert.deepEqual(keys(), ['a1', 'a1', 'b1', 'a1'], "B's edit is written within 1,100 ms");
+  assert.equal(statuses.at(-1), 'error', 'A is still unsaved');
+  await advance(10_000);
+  assert.equal(attempts.length, 4, 'no retry without an edit');
+
+  attempts.length = 0;
+  for (let n = 2; n <= 5; n++) {
+    scheduler.change({ id: 'b', n });
+    await advance(50);
+  }
+  await advance(2000);
+  assert.deepEqual(keys(), ['b5', 'a1'], 'one write per deck for a burst of edits');
+  await assert.rejects(scheduler.flush(), /storage full/);
+});
