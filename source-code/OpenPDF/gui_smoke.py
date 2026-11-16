@@ -381,6 +381,8 @@ def exercise_app(app):
                for a in app.pdf.doc[0].annots()), 'Stamp was not placed'
 
     # Comment list enumerates every annotation and deletes the selected one.
+    for n in (1, 2, 3):  # sticky notes are what a save renumbers (issue #74)
+        app.pdf.note(0, fitz.Point(420, 600 + 30 * n), f'smoke note {n}')
     total = len(app.pdf.annotations())
     assert total >= 4, 'Expected markup, shape, callout and stamp annotations'
     app.comment_list()
@@ -389,12 +391,51 @@ def exercise_app(app):
     tree = next(w for w in descendants(list_win) if w.winfo_class() == 'Treeview')
     rows = tree.get_children()
     assert len(rows) == total, 'Comment list did not show every annotation'
+    # Save as renumbers the open document; the open list must still delete its
+    # selected row, one whose object number moved, and not a neighbour (issue #74).
+    def identity(item):
+        return item['kind'], item['text'], tuple(round(v, 2) for v in item['rect'])
+    held = app.pdf.annotations()
+    with tempfile.TemporaryDirectory() as folder, \
+            patch.object(app, 'output', return_value=str(Path(folder) / 'list-open.pdf')):
+        app.save()
+    app.update()
+    moved = [n for n, (old, new) in enumerate(zip(held, app.pdf.annotations())) if old['xref'] != new['xref']]
+    assert moved, 'Save as no longer renumbers; this check needs another way to go stale'
+    pick = moved[-1]
+    chosen = identity(held[pick])
+    delete_button = next(w for w in descendants(list_win)
+                         if w.winfo_class() == 'TButton' and w.cget('text') == 'Delete')
+    tree.selection_set(rows[pick])
+    tree.focus(rows[pick])
+    delete_button.invoke()
+    app.update()
+    left = [identity(item) for item in app.pdf.annotations()]
+    assert len(left) == total - 1, 'Comment list delete did not remove an annotation'
+    assert chosen not in left, 'Comment list deleted a different annotation after Save as'
+    app.undo()
+    assert chosen in [identity(item) for item in app.pdf.annotations()], 'Undo did not bring the comment back'
+    app.redo()
+    assert len(app.pdf.annotations()) == total - 1, 'Redo did not delete the comment again'
+    # A row whose comment was removed elsewhere says so and adds no undo step.
+    rows = tree.get_children()
     tree.selection_set(rows[0])
     tree.focus(rows[0])
-    next(w for w in descendants(list_win)
-         if w.winfo_class() == 'TButton' and w.cget('text') == 'Delete').invoke()
+    kept = app.pdf.bytes()
+    page = app.pdf.doc[app.pdf.annotations()[0]['page']]
+    page.delete_annot(page.first_annot)
+    steps = len(app.history)
+    import sys
+    from tkinter import messagebox
+    with patch.object(sys, 'argv', ['app.py']), patch.object(messagebox, 'showerror') as shown:
+        delete_button.invoke()
     app.update()
-    assert len(app.pdf.annotations()) == total - 1, 'Comment list delete did not remove an annotation'
+    assert shown.called and 'no longer in the document' in app.status.get(), 'Stale comment row was not reported'
+    assert len(app.history) == steps, 'Stale comment row added an undo step'
+    assert len(app.pdf.annotations()) == total - 2, 'Stale comment row removed another annotation'
+    assert len(tree.get_children()) == total - 2, 'Comment list did not reload after a stale row'
+    app.pdf.restore(kept)
+    app.refresh()
     for child in app.winfo_children():
         if isinstance(child, tk.Toplevel):
             child.destroy()

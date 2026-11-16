@@ -264,21 +264,41 @@ class PDF:
         items = []
         for index in range(len(self.doc)):
             page = self.doc[index]  # hold the page; annots die with their parent
-            for annot in page.annots():
-                info = annot.info
-                items.append({'page': index, 'kind': annot.type[1],
-                              'text': info.get('content', '') or '',
-                              'author': info.get('title', '') or '',
-                              'rect': tuple(annot.rect), 'xref': annot.xref})
+            for place, annot in enumerate(page.annots()):
+                items.append(dict(self._annotation_row(annot), page=index, index=place, xref=annot.xref))
         return items
 
-    def delete_annotation(self, index, xref):
-        page = self.doc[index]
-        for annot in page.annots():
-            if annot.xref == xref:
-                page.delete_annot(annot)
-                return True
-        return False
+    @staticmethod
+    def _annotation_row(annot):
+        info = annot.info
+        return {'kind': annot.type[1], 'text': info.get('content', '') or '',
+                'author': info.get('title', '') or '', 'rect': tuple(annot.rect)}
+
+    def delete_annotation(self, row):
+        # `row` is an item from annotations(), possibly held since before a save.
+        # Saving with garbage collection renumbers the open document, so the
+        # comment is found by its place on the page, checked against what the
+        # row says it is, and never by its object number.
+        if not 0 <= row['page'] < len(self.doc):
+            return False
+        page = self.doc[row['page']]
+        annots = list(page.annots())
+
+        def same(annot):
+            found = self._annotation_row(annot)
+            return (all(found[key] == row[key] for key in ('kind', 'text', 'author'))
+                    and all(abs(a - b) < 0.01 for a, b in zip(found['rect'], row['rect'])))
+
+        place = row.get('index', -1)
+        if 0 <= place < len(annots) and same(annots[place]):
+            target = annots[place]
+        else:  # the page changed since the row was read: accept one exact match only
+            matches = [annot for annot in annots if same(annot)]
+            if len(matches) != 1:
+                return False
+            target = matches[0]
+        page.delete_annot(target)
+        return True
 
     # Supported interactive field types. Radio groups need a parent-field
     # structure PyMuPDF's add_widget does not build, so they are not offered yet.

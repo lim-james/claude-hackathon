@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 import fitz
 from core import PDF
 
@@ -9,6 +11,7 @@ class AnnotationTests(unittest.TestCase):
         page = self.pdf.doc.new_page(width=500, height=700)
         page.insert_text((40, 50), 'The quick brown fox jumps')
         self.pdf.doc.new_page(width=500, height=700)
+        self.blank = self.pdf.bytes()
 
     def tearDown(self):
         self.pdf.close()
@@ -97,13 +100,84 @@ class AnnotationTests(unittest.TestCase):
         self.assertEqual(note['text'], 'note on page two')
         self.assertEqual(note['author'], 'B')
         # delete the note, keep the markup
-        self.assertTrue(self.pdf.delete_annotation(note['page'], note['xref']))
+        self.assertTrue(self.pdf.delete_annotation(note))
         self.pdf.restore(self.pdf.bytes())
         remaining = self.pdf.annotations()
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]['kind'], 'Underline')
-        # deleting a stale xref is a no-op, not an error
-        self.assertFalse(self.pdf.delete_annotation(0, 999999))
+        # deleting a row that is already gone is a no-op, not an error
+        self.assertFalse(self.pdf.delete_annotation(note))
+        self.assertFalse(self.pdf.delete_annotation(dict(note, page=99)))
+        self.assertEqual(len(self.pdf.annotations()), 1)
+
+    def six_notes(self):
+        for n in range(1, 7):
+            self.pdf.note(0, fitz.Point(300, 60 + 40 * n), f'note {n}')
+        return self.pdf.annotations()
+
+    def texts(self):
+        return [item['text'] for item in self.pdf.annotations()]
+
+    def test_delete_uses_the_held_row_after_the_document_is_renumbered(self):
+        # Issue #74: Save as, Save version and opening Optimize all write with
+        # garbage=4, which renumbers the open document under an open Comment list.
+        with tempfile.TemporaryDirectory() as folder:
+            renumber = {
+                'save as': lambda: self.pdf.save(str(Path(folder) / 'saved.pdf')),
+                'save version': lambda: self.pdf.doc.tobytes(garbage=4, deflate=True),
+                'optimize': lambda: self.pdf.current_size(),
+            }
+            for name, action in renumber.items():
+                with self.subTest(after=name):
+                    self.pdf.restore(self.blank)
+                    rows = self.six_notes()
+                    action()
+                    self.assertTrue(self.pdf.delete_annotation(rows[3]))
+                    self.assertEqual(self.texts(), ['note 1', 'note 2', 'note 3', 'note 5', 'note 6'])
+                    self.assertTrue(self.pdf.delete_annotation(rows[2]))
+                    self.assertEqual(self.texts(), ['note 1', 'note 2', 'note 5', 'note 6'])
+
+    def test_deleting_a_held_row_twice_removes_nothing_else(self):
+        rows = self.six_notes()
+        self.pdf.current_size()
+        self.assertTrue(self.pdf.delete_annotation(rows[3]))
+        self.assertFalse(self.pdf.delete_annotation(rows[3]))
+        self.assertEqual(self.texts(), ['note 1', 'note 2', 'note 3', 'note 5', 'note 6'])
+
+    def test_delete_picks_the_selected_one_of_two_identical_comments(self):
+        self.pdf.note(0, fitz.Point(300, 100), 'twin')
+        self.pdf.note(0, fitz.Point(300, 100), 'twin')
+        self.pdf.note(0, fitz.Point(300, 200), 'other')
+        rows = self.pdf.annotations()
+        first = self.pdf.doc[0].first_annot.info['id']
+        self.pdf.current_size()
+        self.assertTrue(self.pdf.delete_annotation(rows[1]))
+        self.assertEqual(self.texts(), ['twin', 'other'])
+        self.assertEqual(self.pdf.doc[0].first_annot.info['id'], first)
+        # Once the page has changed, a row that fits two comments deletes neither.
+        self.pdf.note(0, fitz.Point(300, 100), 'twin')
+        self.assertFalse(self.pdf.delete_annotation(dict(rows[1], index=1)))
+        self.assertEqual(self.texts(), ['twin', 'other', 'twin'])
+
+    def test_delete_finds_a_comment_that_moved_up_the_page_list(self):
+        rows = self.six_notes()
+        page = self.pdf.doc[0]
+        page.delete_annot(page.first_annot)  # removed in the main window, list still open
+        self.pdf.current_size()
+        self.assertTrue(self.pdf.delete_annotation(rows[3]))
+        self.assertEqual(self.texts(), ['note 2', 'note 3', 'note 5', 'note 6'])
+
+    def test_delete_works_for_a_comment_without_a_name(self):
+        self.pdf.note(0, fitz.Point(300, 100), 'from another program')
+        self.pdf.note(0, fitz.Point(300, 200), 'keep')
+        for annot in self.pdf.doc[0].annots():
+            self.pdf.doc.xref_set_key(annot.xref, 'NM', 'null')
+        self.pdf.restore(self.pdf.bytes())
+        rows = self.pdf.annotations()
+        self.assertEqual(self.pdf.doc.xref_get_key(rows[0]['xref'], 'NM')[0], 'null')
+        self.pdf.current_size()
+        self.assertTrue(self.pdf.delete_annotation(rows[0]))
+        self.assertEqual(self.texts(), ['keep'])
 
 
 if __name__ == '__main__':
