@@ -312,6 +312,115 @@ class RedactionOverlayTests(unittest.TestCase):
         self.assertEqual(purge_overlays(page), (1, 0))
         self.assertEqual(len(loaded), 1)
 
+    def raw(self, body, page=0, listed=True):
+        # An object as another tool writes it: no appearance stream, any /Rect.
+        doc = self.pdf.doc
+        xref = doc.get_new_xref()
+        doc.update_object(xref, body.replace('PAGE', f'{doc[page].xref} 0 R'))
+        if listed:
+            kind, array = doc.xref_get_key(doc[page].xref, 'Annots')
+            array = array if kind == 'array' else '[]'
+            doc.xref_set_key(doc[page].xref, 'Annots', f'{array[:-1]} {xref} 0 R]')
+        return xref
+
+    def reopen(self):
+        # As the app has it at the time of a redaction: read from a file and shown once.
+        self.pdf.restore(self.pdf.doc.tobytes())
+        self.pdf.doc[0].get_pixmap()
+
+    def test_objects_other_tools_write_are_found_under_the_area(self):
+        # AREA is x 60 to 320, y 592 to 652 in the PDF's own coordinates.
+        note = '<</Type/Annot/Subtype/Text/P PAGE/Rect[%s]/Contents(RAW-SECRET)/T(AUTHOR-SECRET)>>'
+        field = '<</Type/Annot/Subtype/Widget/P PAGE/Rect[%s]/FT/Tx/T(h)/V(RAW-SECRET)>>'
+        cases = {
+            'note at a point': (note % '200 622 200 622', (0, 1)),
+            'note icon reaching into the area': (note % '322 620 323 621', (0, 1)),
+            'note with its corners swapped': (note % '220 640 200 620', (0, 1)),
+            'line with a flat rectangle': ('<</Type/Annot/Subtype/Line/P PAGE/Rect[100 622 280 622]'
+                                           '/L[100 622 280 622]/Contents(RAW-SECRET)>>', (0, 1)),
+            'line drawn away from its rectangle': ('<</Type/Annot/Subtype/Line/P PAGE/Rect[400 100 500 110]'
+                                                   '/L[100 622 280 622]/Contents(RAW-SECRET)>>', (0, 1)),
+            'ink drawn away from its rectangle': ('<</Type/Annot/Subtype/Ink/P PAGE/Rect[400 100 500 110]'
+                                                  '/InkList[[100 610 200 630]]/Contents(RAW-SECRET)>>', (0, 1)),
+            'subtype MuPDF does not know': ('<</Type/Annot/Subtype/Foo/P PAGE/Rect[200 620 220 640]'
+                                            '/Contents(RAW-SECRET)>>', (0, 1)),
+            'popup with no comment': ('<</Type/Annot/Subtype/Popup/P PAGE/Rect[100 600 300 640]'
+                                      '/Contents(RAW-SECRET)>>', (0, 0)),
+            'link at a point': ('<</Type/Annot/Subtype/Link/P PAGE/Rect[200 622 200 622]'
+                                '/A<</S/URI/URI(mailto:RAW-SECRET@example.com)>>>>', (0, 0)),
+            'field at a point': (field % '200 622 200 622', (1, 0)),
+            'hidden field': (field % '100 610 300 640' + '/F 2', (1, 0)),
+        }
+        fitz.TOOLS.mupdf_display_errors(False)  # MuPDF says it cannot draw the unknown subtype
+        self.addCleanup(fitz.TOOLS.mupdf_display_errors, True)
+        for name, (body, removed) in cases.items():
+            with self.subTest(name):
+                self.pdf.restore(self.blank())
+                self.raw(body)
+                self.reopen()
+                self.assertEqual(self.pdf.redact(0, AREA), removed)
+                self.assert_clean('RAW-SECRET', 'AUTHOR-SECRET')
+                self.assertEqual(self.pdf.doc[0].annot_xrefs(), [])
+                # A second redaction in the session finds the page in order.
+                self.assertEqual(self.pdf.redact(0, OUTSIDE), (0, 0))
+
+    def test_objects_away_from_the_area_are_kept(self):
+        note = '<</Type/Annot/Subtype/Text/P PAGE/Rect[%s]/Contents(KEPT)>>'
+        for name, rect in (('point', '200 300 200 300'), ('off the page', '2000 2000 2020 2020'),
+                           ('icon clear of the area', '350 620 351 621')):
+            with self.subTest(name):
+                self.pdf.restore(self.blank())
+                self.raw(note % rect)
+                self.raw('<</Type/Annot/Subtype/Widget/P PAGE/Rect[0 0 0 0]/F 2/FT/Tx/T(h)/V(KEPT)>>')
+                self.reopen()
+                self.assertEqual(self.pdf.redact(0, AREA), (0, 0))
+                self.assertEqual(len(self.pdf.doc[0].annot_xrefs()), 2)
+
+    def test_popup_under_the_area_goes_and_its_comment_stays(self):
+        for listed in (True, False):  # in /Annots, or reachable only through /Popup
+            with self.subTest(listed=listed):
+                self.pdf.restore(self.blank())
+                note = self.raw('<</Type/Annot/Subtype/Text/P PAGE/Rect[400 100 420 120]/Contents(KEPT-NOTE)>>')
+                popup = self.raw(f'<</Type/Annot/Subtype/Popup/P PAGE/Rect[100 600 300 640]/Parent {note} 0 R'
+                                 '/Contents(POPUP-SECRET)>>', listed=listed)
+                self.pdf.doc.xref_set_key(note, 'Popup', f'{popup} 0 R')
+                self.reopen()
+                self.assertEqual(self.pdf.redact(0, AREA), (0, 0))
+                with self.export() as doc:
+                    self.assertFalse(self.has(doc, 'POPUP-SECRET'))
+                    self.assertEqual([(a.info['content'], a.popup_xref) for a in doc[0].annots()], [('KEPT-NOTE', 0)])
+
+    def test_comment_reachable_only_through_a_reply_is_removed(self):
+        hidden = self.raw('<</Type/Annot/Subtype/Text/P PAGE/Rect[200 620 220 640]/Contents(NOTE-SECRET)>>',
+                          listed=False)
+        self.raw(f'<</Type/Annot/Subtype/Text/P PAGE/Rect[400 100 420 120]/Contents(REPLY-SECRET)/IRT {hidden} 0 R>>')
+        self.reopen()
+        self.assertEqual(self.pdf.redact(0, AREA), (0, 2))
+        self.assert_clean('NOTE-SECRET', 'REPLY-SECRET')
+
+    def test_comments_that_answer_each_other_are_removed(self):
+        first = self.raw('<</Type/Annot/Subtype/Text/P PAGE/Rect[200 620 220 640]/Contents(NOTE-SECRET)>>')
+        second = self.raw(f'<</Type/Annot/Subtype/Text/P PAGE/Rect[400 100 420 120]/Contents(REPLY-SECRET)'
+                          f'/IRT {first} 0 R>>')
+        self.pdf.doc.xref_set_key(first, 'IRT', f'{second} 0 R')
+        self.reopen()
+        self.assertEqual(self.pdf.redact(0, AREA), (0, 2))
+        self.assert_clean('NOTE-SECRET', 'REPLY-SECRET')
+
+    def test_value_is_removed_when_the_widgets_left_show_nothing(self):
+        doc = self.pdf.doc
+        doc.new_page()
+        parent = doc.get_new_xref()
+        self.raw(f'<</Type/Annot/Subtype/Widget/P PAGE/Rect[100 610 300 640]/Parent {parent} 0 R>>')
+        unseen = self.raw(f'<</Type/Annot/Subtype/Widget/P PAGE/Rect[0 0 0 0]/F 2/Parent {parent} 0 R>>', page=1)
+        doc.update_object(parent, f'<</FT/Tx/T(two)/V(PARENT-SECRET)/Kids[{unseen - 1} 0 R {unseen} 0 R]>>')
+        doc.xref_set_key(doc.pdf_catalog(), 'AcroForm', f'<</Fields[{parent} 0 R]>>')
+        self.reopen()
+        self.assertEqual(self.pdf.redact(0, AREA), (1, 0))
+        self.assert_clean('PARENT-SECRET')
+        self.assertEqual(self.pdf.doc[1].annot_xrefs(), [])
+        self.assertEqual(self.pdf.fields(), [])
+
     def test_text_edit_under_a_note_keeps_the_note(self):
         # replace_text uses a redact annotation only to delete glyphs.
         page = self.pdf.doc[0]
