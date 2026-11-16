@@ -29,13 +29,26 @@ class OptimizeTests(unittest.TestCase):
         pdf = self.make_image_pdf()
         try:
             before = pdf.current_size()
+            images = pdf.doc[0].get_images(full=True)
             data = pdf.optimized_bytes(dpi=96, quality=50)
             self.assertLess(len(data), before, 'Optimization did not reduce size')
             # The live document is untouched by producing optimized bytes.
             self.assertEqual(pdf.current_size(), before, 'Source document was mutated')
+            self.assertEqual(pdf.doc[0].get_images(full=True), images, 'Source image was replaced')
             reopened = fitz.open('pdf', data)
             self.assertEqual(reopened.page_count, 1)
             reopened.close()
+        finally:
+            pdf.close()
+
+    def test_current_size_is_stable_for_an_unchanged_document(self):
+        # Each save used to write a new random trailer /ID whose encoded length
+        # varies, so about 1 size in 120 came out a few bytes off.
+        pdf = PDF()
+        pdf.doc.new_page()
+        try:
+            sizes = {pdf.current_size() for _ in range(1000)}
+            self.assertEqual(len(sizes), 1, f'current_size varied: {sorted(sizes)}')
         finally:
             pdf.close()
 

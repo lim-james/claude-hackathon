@@ -206,14 +206,17 @@ class PDF:
                 os.unlink(tmp)
 
     def current_size(self):
-        data = self.doc.tobytes(garbage=4, deflate=True)
+        # no_new_id: a plain save writes a new random trailer /ID, whose encoded
+        # length varies, so an unchanged document measured a few bytes differently.
+        data = self.doc.tobytes(garbage=4, deflate=True, no_new_id=True)
         self._base = self._file = None  # garbage collection renumbered the open document
         return len(data)
 
     def optimized_bytes(self, dpi=120, quality=70, downsample_images=True,
                         subset_fonts=True, strip_metadata=False):
         # Work on a copy so the open document is never mutated by optimization.
-        work = fitz.open('pdf', self.doc.tobytes())
+        # A plain save would store a new trailer /ID in the open document.
+        work = fitz.open('pdf', self.doc.tobytes(no_new_id=True))
         try:
             if strip_metadata:
                 work.set_metadata({})
