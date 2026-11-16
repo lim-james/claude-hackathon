@@ -220,48 +220,81 @@ def delete_box(doc, index, identifier):
         contents(page, [x for x in page.get_contents() if x != target['xref']])
 
 
-def _refs(doc, xref, key):
-    """Where an array of references lives (it may be an indirect object) and its xrefs."""
+_REF = r'(\d+) \d+ R'
+_OBJR = re.compile(r'<<(?:(?!<<|>>).)*?/Obj (\d+) \d+ R(?:(?!<<|>>).)*?>>', re.S)
+
+
+def _ref(doc, xref, key):
+    """The object number a key refers to, or 0."""
+    kind, value = doc.xref_get_key(xref, key)
+    return int(value.split()[0]) if kind == 'xref' else 0
+
+
+def _drop_refs(doc, xref, key, targets):
+    """Remove references to targets from an array (direct or indirect); return how many stay.
+
+    The array text is edited in place, so entries of any generation survive.
+    """
     kind, value = doc.xref_get_key(xref, key)
     if kind == 'xref':
         xref, key = int(value.split()[0]), None
         value = doc.xref_object(xref, compressed=True)
     elif kind != 'array':
-        return xref, key, None
-    return xref, key, [int(n) for n in re.findall(r'(\d+) 0 R', value)]
-
-
-def _drop_ref(doc, xref, key, target):
-    """Remove one reference from an array; return how many are left."""
-    owner, owner_key, refs = _refs(doc, xref, key)
-    if refs is None:
         return 0
-    refs = [x for x in refs if x != target]
-    array = '[' + ' '.join(f'{x} 0 R' for x in refs) + ']'
-    if owner_key is None:
-        doc.update_object(owner, array)
-    else:
-        doc.xref_set_key(owner, owner_key, array)
-    return len(refs)
-
-
-def _drop_empty_field(doc, parent):
-    """A field whose last widget is gone keeps its value on the parent: unlink it."""
-    while parent:
-        if _refs(doc, parent, 'Kids')[2]:
-            return
-        doc.xref_set_key(parent, 'V', 'null')
-        kind, value = doc.xref_get_key(parent, 'Parent')
-        above = int(value.split()[0]) if kind == 'xref' else 0
-        if above:
-            _drop_ref(doc, above, 'Kids', parent)
+    array = re.sub(_REF, lambda m: '' if int(m.group(1)) in targets else m.group(0), value)
+    if array != value:
+        if key is None:
+            doc.update_object(xref, array)
         else:
-            form, key = doc.pdf_catalog(), 'AcroForm/Fields'
-            kind, value = doc.xref_get_key(form, 'AcroForm')
-            if kind == 'xref':
-                form, key = int(value.split()[0]), 'Fields'
-            _drop_ref(doc, form, key, parent)
-        parent = above
+            doc.xref_set_key(xref, key, array)
+    return len(re.findall(_REF, array))
+
+
+def _form(doc):
+    """Where the AcroForm dictionary lives: (xref, key prefix)."""
+    form = _ref(doc, doc.pdf_catalog(), 'AcroForm')
+    return (form, '') if form else (doc.pdf_catalog(), 'AcroForm/')
+
+
+def _drop_empty_fields(doc, parents, gone):
+    """A field whose last widget is gone keeps its value on the parent: unlink it."""
+    form, prefix = _form(doc)
+    while parents:
+        above = {}
+        for parent, kids in parents.items():
+            if _drop_refs(doc, parent, 'Kids', kids):
+                continue
+            higher = _ref(doc, parent, 'Parent')
+            if higher:
+                above.setdefault(higher, set()).add(parent)
+            else:
+                _drop_refs(doc, form, prefix + 'Fields', {parent})
+            gone.add(parent)
+        parents = above
+
+
+def _drop_struct_refs(doc, gone):
+    """Tagged PDF: structure elements point at fields and comments through OBJR dictionaries."""
+    if doc.xref_get_key(doc.pdf_catalog(), 'StructTreeRoot')[0] == 'null':
+        return
+    for xref in range(1, doc.xref_length()):
+        if doc.xref_is_stream(xref):
+            continue
+        text = doc.xref_object(xref, compressed=True)
+        if '/Obj ' not in text:
+            continue
+        new = _OBJR.sub(lambda m: ' null ' if int(m.group(1)) in gone else m.group(0), text)
+        if new != text:
+            doc.update_object(xref, new)
+
+
+def _pdf_rect(doc, xref):
+    """An annotation's /Rect as stored (PDF coordinates), without loading the annotation."""
+    kind, value = doc.xref_get_key(xref, 'Rect')
+    if kind == 'xref':
+        value = doc.xref_object(int(value.split()[0]), compressed=True)
+    numbers = re.findall(r'-?\d*\.?\d+', value)
+    return fitz.Rect([float(n) for n in numbers]).normalize() if len(numbers) == 4 else None
 
 
 def purge_overlays(page):
@@ -271,27 +304,72 @@ def purge_overlays(page):
     note inside a redacted area would survive the export. Call this before
     apply_redactions on a user-facing redaction, not when a redact annotation
     is only a way to delete glyphs for a text edit.
+
+    Returns (form fields removed, comments removed).
     """
     doc = page.parent
-    areas = [a.rect for a in page.annots() or [] if a.type[0] == fitz.PDF_ANNOT_REDACT]
-    inside = lambda rect: any(fitz.Rect(rect).intersects(area) for area in areas)
-    for xref, parent in [(w.xref, doc.xref_get_key(w.xref, 'Parent'))
-                         for w in page.widgets() or [] if inside(w.rect)]:
+    entries = [(xref, kind, _pdf_rect(doc, xref)) for xref, kind, _id in page.annot_xrefs()
+               if kind != fitz.PDF_ANNOT_LINK]
+    areas = [rect for _xref, kind, rect in entries if kind == fitz.PDF_ANNOT_REDACT and rect]
+    hit = lambda rect: any(rect.intersects(area) for area in areas)
+    shown_areas = []
+
+    def inside(xref, kind, rect):
+        # Stored rectangles share one coordinate space, so only a few objects need loading:
+        # a rectangle that cannot be read, and one flagged NoRotate (a note icon), which
+        # is drawn upright and so elsewhere on a rotated page.
+        flags = doc.xref_get_key(xref, 'F')[1] if page.rotation else ''
+        if rect is None or (flags.isdigit() and int(flags) & 16):
+            if not shown_areas:
+                shown_areas.extend(a.rect for a in page.annots(types=[fitz.PDF_ANNOT_REDACT]))
+            shown = page.load_annot(xref).rect
+            return any(shown.intersects(area) for area in shown_areas) or bool(rect and hit(rect))
+        return hit(rect)
+
+    entries = [e for e in entries if e[1] != fitz.PDF_ANNOT_REDACT]
+    widgets = [e[0] for e in entries if e[1] == fitz.PDF_ANNOT_WIDGET and inside(*e)]
+    # A popup is only the window of its comment: MuPDF deletes it with the comment.
+    notes = [e for e in entries if e[1] not in (fitz.PDF_ANNOT_WIDGET, fitz.PDF_ANNOT_POPUP)]
+    doomed = {e[0] for e in notes if inside(*e)}
+    replies = {}
+    if doomed:  # replies go with the comment they answer
+        replies = {xref: _ref(doc, xref, 'IRT') for xref, _kind, _rect in notes}
+        while True:
+            more = {xref for xref, irt in replies.items() if irt in doomed} - doomed
+            if not more:
+                break
+            doomed |= more
+    if not widgets and not doomed:
+        return 0, 0
+    gone, parents = set(widgets) | doomed, {}
+    # PyMuPDF deletes the direct replies with a comment, rescans the page's
+    # comments on every delete, and loads the widget after the one deleted. So:
+    # replies before what they answer, comments before widgets, widgets last to first.
+    def depth(xref, limit=len(doomed)):
+        steps = 0
+        while replies.get(xref) in doomed and steps < limit:
+            xref, steps = replies[xref], steps + 1
+        return steps
+    for xref in sorted(doomed, key=depth, reverse=True):
+        gone.add(_ref(doc, xref, 'Popup'))
+        page.delete_annot(page.load_annot(xref))
+    for xref in reversed(widgets):
+        parent = _ref(doc, xref, 'Parent')
+        if parent:
+            parents.setdefault(parent, set()).add(xref)
         page.delete_widget(page.load_widget(xref))  # also unlinks a field with no parent
-        if parent[0] == 'xref':
-            parent = int(parent[1].split()[0])
-            _drop_ref(doc, parent, 'Kids', xref)
-            _drop_empty_field(doc, parent)
-    notes = [(a.xref, a.irt_xref, a.rect) for a in page.annots() or []
-             if a.type[0] not in (fitz.PDF_ANNOT_REDACT, fitz.PDF_ANNOT_WIDGET)]
-    doomed = {xref for xref, _irt, rect in notes if inside(rect)}
-    while True:  # replies go with the comment they answer
-        replies = {xref for xref, irt, _rect in notes if irt in doomed} - doomed
-        if not replies:
-            break
-        doomed |= replies
-    for xref in doomed:
-        page.delete_annot(page.load_annot(xref))  # takes the popup with it
+    gone.discard(0)
+    if widgets:
+        form, prefix = _form(doc)
+        _drop_empty_fields(doc, parents, gone)
+        _drop_refs(doc, form, prefix + 'CO', gone)
+        doc.xref_set_key(form, prefix + 'XFA', 'null')  # XFA keeps its own copy of every value
+    _drop_struct_refs(doc, gone)
+    # Anything else that still refers to these objects must find them empty,
+    # or save() would write the value out again.
+    for xref in gone:
+        doc.update_object(xref, '<<>>')
+    return len(widgets), len(doomed)
 
 
 def apply_redactions(page, preserve_native=False, **options):

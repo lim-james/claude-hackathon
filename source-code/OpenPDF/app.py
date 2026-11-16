@@ -31,7 +31,7 @@ elif sys.stdout is None or sys.stderr is None:
 
 import fitz
 from PIL import Image, ImageTk
-from core import PDF, page_numbers, images_to_pdf, office_to_pdf
+from core import PDF, page_numbers, images_to_pdf, office_to_pdf, removed_summary
 from text_tools import find_matches, replace_match, select_text, lines
 from box_tools import text_sections
 from inline_editor import InlineEditor
@@ -961,14 +961,18 @@ class App(tk.Tk):
 
     def redact(self):
         self.require()
+        removed = []
+        overlays = 'Form fields and comments (notes, highlights, stamps, drawings) that touch it are removed whole.'
         if self.text_quads:
             quads = list(self.text_quads)
-            if mb.askyesno('Redact selected text', 'Permanently remove the selected characters in the exported PDF?', parent=self):
-                self.change(lambda: self.pdf.redact_quads(self.index, quads), 'Selected text redacted. Save as to export the cleaned PDF.', dirty_pages={self.index})
+            if mb.askyesno('Redact selected text', f'Permanently remove the selected characters in the exported PDF? {overlays}', parent=self):
+                self.change(lambda: removed.append(self.pdf.redact_quads(self.index, quads)), 'Selected text redacted.', dirty_pages={self.index})
+                self.status.set(f'Selected text redacted. {removed_summary(*removed[0])}Save as to export the cleaned PDF.')
             return
         rect = self.rect()
-        if mb.askyesno('Redact', 'Remove text, image pixels, and intersecting graphics in this area? Save as a new file afterward.', parent=self):
-            self.change(lambda: self.pdf.redact(self.index, rect), 'Area redacted. Save as to write a cleaned PDF. Other copies and metadata are separate.')
+        if mb.askyesno('Redact', f'Remove text, image pixels, and intersecting graphics in this area? {overlays} Save as a new file afterward.', parent=self):
+            self.change(lambda: removed.append(self.pdf.redact(self.index, rect)), 'Area redacted.')
+            self.status.set(f'Area redacted. {removed_summary(*removed[0])}Save as to write a cleaned PDF. Other copies and metadata are separate.')
 
     def sanitize(self):
         self.require()

@@ -16,6 +16,14 @@ from text_tools import find_matches, replace_match, select_text
 from rich_boxes import apply_redactions, purge_overlays
 
 
+def removed_summary(fields, comments):
+    """Status text for what a redaction deleted besides page content; '' when nothing."""
+    parts = [f'{n} {noun}{"" if n == 1 else "s"}' for n, noun in ((fields, 'form field'), (comments, 'comment')) if n]
+    if not parts:
+        return ''
+    return f'{" and ".join(parts)} under it {"was" if fields + comments == 1 else "were"} removed. '
+
+
 def page_numbers(spec, count):
     result = []
     for part in spec.split(','):
@@ -174,16 +182,18 @@ class PDF:
     def redact(self, index, rect):
         page = self.doc[index]
         page.add_redact_annot(rect, fill=(0, 0, 0))
-        purge_overlays(page)
+        removed = purge_overlays(page)
         apply_redactions(page, images=2, graphics=2, text=0)
+        return removed  # (form fields, comments) deleted with the area
 
     def redact_quads(self, index, quads):
         # Selected-text redaction: glyphs only, images and graphics stay.
         page = self.doc[index]
         for quad in quads:
             page.add_redact_annot(quad.rect + (0.05, 0.05, -0.05, -0.05), fill=(0, 0, 0))
-        purge_overlays(page)
+        removed = purge_overlays(page)
         apply_redactions(page, images=0, graphics=0, text=0)
+        return removed
 
     def sanitize(self):
         self.doc.set_metadata({})

@@ -1,10 +1,12 @@
 """Redaction removes form fields and comments under the area, not only page content."""
+import re
 import tempfile
 import unittest
 from pathlib import Path
 import fitz
-from core import PDF
+from core import PDF, removed_summary
 from pen_tools import add_stroke
+from rich_boxes import purge_overlays
 
 AREA = fitz.Rect(60, 190, 320, 250)
 INSIDE = fitz.Rect(72, 200, 300, 240)
@@ -198,6 +200,117 @@ class RedactionOverlayTests(unittest.TestCase):
         self.assertEqual([(name, value) for _, name, value, _, _ in self.pdf.fields()],
                          [('ssn', 'FIELD-SECRET')])
         self.assertEqual([a['text'] for a in self.pdf.annotations()], ['NOTE-SECRET'])
+
+    def tag(self, xref, kind):
+        # A tagged PDF: the structure tree points at the object through an OBJR.
+        doc = self.pdf.doc
+        root, elem = doc.get_new_xref(), doc.get_new_xref()
+        doc.update_object(elem, f'<</Type/StructElem/S/{kind}/P {root} 0 R/Pg {doc[0].xref} 0 R'
+                                f'/K<</Type/OBJR/Obj {xref} 0 R>>>>')
+        doc.update_object(root, f'<</Type/StructTreeRoot/K[{elem} 0 R]>>')
+        doc.xref_set_key(doc.pdf_catalog(), 'StructTreeRoot', f'{root} 0 R')
+        return elem
+
+    def test_tagged_pdf_field_and_note_leave_no_value_behind(self):
+        doc = self.pdf.doc
+        self.pdf.add_field(0, INSIDE, 'ssn')
+        self.pdf.fill_field(0, 'ssn', 'FIELD-SECRET')
+        field = self.tag(next(doc[0].widgets()).xref, 'Form')
+        self.pdf.redact(0, AREA)
+        note = self.pdf.note(0, fitz.Point(200, 195), 'NOTE-SECRET', 'AUTHOR-SECRET')
+        annot = self.tag(note.xref, 'Annot')
+        self.pdf.redact(0, AREA)
+        for elem in (field, annot):
+            self.assertNotIn('OBJR', doc.xref_object(elem))
+        self.assert_clean('FIELD-SECRET', 'NOTE-SECRET', 'AUTHOR-SECRET', 'ssn')
+
+    def test_field_in_the_calculation_order_leaves_no_value_behind(self):
+        doc = self.pdf.doc
+        self.pdf.add_field(0, INSIDE, 'ssn')
+        self.pdf.fill_field(0, 'ssn', 'FIELD-SECRET')
+        self.pdf.add_field(0, OUTSIDE, 'kept')
+        gone, kept = [w.xref for w in doc[0].widgets()]
+        doc.xref_set_key(doc.pdf_catalog(), 'AcroForm/CO', f'[{gone} 0 R {kept} 0 R]')
+        self.pdf.redact(0, AREA)
+        self.assertEqual(doc.xref_get_key(doc.pdf_catalog(), 'AcroForm/CO')[1].replace(' ', ''), f'[{kept}0R]')
+        self.assert_clean('FIELD-SECRET', 'ssn')
+
+    def test_xfa_copy_of_the_form_is_dropped_with_a_redacted_field(self):
+        doc = self.pdf.doc
+        self.pdf.add_field(0, INSIDE, 'ssn')
+        self.pdf.fill_field(0, 'ssn', 'FIELD-SECRET')
+        xfa = doc.get_new_xref()
+        doc.update_object(xfa, '<<>>')
+        doc.update_stream(xfa, b'<xfa:data><ssn>XFA-SECRET</ssn></xfa:data>')
+        doc.xref_set_key(doc.pdf_catalog(), 'AcroForm/XFA', f'{xfa} 0 R')
+        self.pdf.redact(0, fitz.Rect(400, 600, 500, 700))  # nothing under it: the form is left alone
+        self.assertEqual(doc.xref_get_key(doc.pdf_catalog(), 'AcroForm/XFA')[0], 'xref')
+        self.pdf.redact(0, AREA)
+        self.assert_clean('FIELD-SECRET', 'XFA-SECRET')
+
+    def test_sibling_reference_with_a_generation_number_is_kept(self):
+        doc = self.pdf.doc
+        self.pdf.add_field(0, INSIDE, 'gone')
+        self.pdf.add_field(0, OUTSIDE, 'kept')
+        gone, kept = [w.xref for w in doc[0].widgets()]
+        first, second = doc.get_new_xref(), doc.get_new_xref()
+        doc.update_object(first, f'<</FT/Tx/T(a)/Kids[{gone} 0 R 9999 1 R]>>')
+        doc.update_object(second, f'<</FT/Tx/T(b)/Kids[{kept} 0 R]>>')
+        doc.xref_set_key(gone, 'Parent', f'{first} 0 R')
+        doc.xref_set_key(kept, 'Parent', f'{second} 0 R')
+        doc.xref_set_key(doc.pdf_catalog(), 'AcroForm/Fields', f'[{first} 0 R 9998 2 R {second} 0 R]')
+        fitz.TOOLS.mupdf_display_errors(False)  # the made-up siblings do not exist
+        self.addCleanup(fitz.TOOLS.mupdf_display_errors, True)
+        refs = lambda xref, key: re.findall(r'\d+ \d+ R', doc.xref_get_key(xref, key)[1])
+        self.pdf.redact(0, AREA)
+        self.assertEqual(refs(first, 'Kids'), ['9999 1 R'])
+        self.pdf.redact(0, OUTSIDE)
+        self.assertEqual(refs(doc.pdf_catalog(), 'AcroForm/Fields'), [f'{first} 0 R', '9998 2 R'])
+
+    def test_rotated_and_cropped_pages_use_the_same_area_as_the_screen(self):
+        for rotation, crop in ((90, None), (180, fitz.Rect(20, 30, 500, 700)), (270, None)):
+            with self.subTest(rotation=rotation):
+                self.pdf.restore(self.blank())
+                page = self.pdf.doc[0]
+                if crop:
+                    page.set_cropbox(crop)
+                page.set_rotation(rotation)
+                self.pdf.add_field(0, INSIDE, 'ssn')
+                self.pdf.fill_field(0, 'ssn', 'FIELD-SECRET')
+                self.pdf.add_field(0, OUTSIDE, 'kept')
+                self.pdf.note(0, fitz.Point(200, 195), 'NOTE-SECRET')
+                self.pdf.note(0, fitz.Point(200, 500), 'KEPT-NOTE')
+                self.assertEqual(self.pdf.redact(0, AREA), (1, 1))
+                self.assertEqual([name for _, name, *_ in self.pdf.fields()], ['kept'])
+                self.assertEqual([a['text'] for a in self.pdf.annotations()], ['KEPT-NOTE'])
+
+    def test_redaction_reports_what_it_removed(self):
+        self.pdf.add_field(0, INSIDE, 'ssn')
+        self.pdf.add_field(0, fitz.Rect(300, 240, 500, 300), 'edge')
+        note = self.pdf.note(0, fitz.Point(200, 195), 'NOTE')
+        reply = self.pdf.note(0, fitz.Point(200, 500), 'REPLY')
+        self.pdf.doc.xref_set_key(reply.xref, 'IRT', f'{note.xref} 0 R')
+        self.pdf.doc[0].insert_text((80, 600), 'plain words')
+        self.assertEqual(self.pdf.redact(0, fitz.Rect(70, 590, 200, 610)), (0, 0))
+        self.assertEqual(self.pdf.redact(0, AREA), (2, 2))  # popups are not counted as comments
+        self.assertEqual(removed_summary(0, 0), '')
+        self.assertEqual(removed_summary(1, 0), '1 form field under it was removed. ')
+        self.assertEqual(removed_summary(2, 1), '2 form fields and 1 comment under it were removed. ')
+        self.assertEqual(removed_summary(0, 3), '3 comments under it were removed. ')
+
+    def test_loads_only_what_is_under_the_area(self):
+        for n in range(30):
+            self.pdf.add_field(0, fitz.Rect(72, 300 + n * 10, 300, 308 + n * 10), f'f{n}')
+            self.pdf.note(0, fitz.Point(400, 300 + n * 10), f'n{n}')
+        self.pdf.add_field(0, INSIDE, 'ssn')
+        page = self.pdf.doc[0]
+        loaded = []
+        load_widget = page.load_widget
+        page.load_widget = lambda xref: loaded.append(xref) or load_widget(xref)
+        page.widgets = page.annots = lambda *a, **k: self.fail('walks every object on the page')
+        page.add_redact_annot(AREA, fill=(0, 0, 0))
+        self.assertEqual(purge_overlays(page), (1, 0))
+        self.assertEqual(len(loaded), 1)
 
     def test_text_edit_under_a_note_keeps_the_note(self):
         # replace_text uses a redact annotation only to delete glyphs.
