@@ -152,18 +152,26 @@ def removal_rects(chars):
     Hundreds of per-character redaction annotations make MuPDF's annotation
     lookup quadratic. Contiguous line segments remove the same glyphs with
     usually one annotation per line.
+
+    MuPDF removes a glyph when the redaction touches the middle 80% of its
+    box height, and a glyph box (font ascender to descender) is taller than
+    single line spacing. A rectangle as tall as the box therefore also
+    deletes the lines above and below, so each rectangle is only a thin band
+    through the vertical centre of its own glyphs.
     """
     segments = []
     for char in sorted(chars, key=lambda c: (round(c['origin'][1], 1), c['bbox'][0])):
         rect = fitz.Rect(char['bbox'])
         if rect.width <= .2 or rect.height <= .2:
             continue
+        middle = (rect.y0 + rect.y1) / 2
+        rect.y0, rect.y1 = middle - rect.height * .04, middle + rect.height * .04
         baseline = char['origin'][1]
         if segments and abs(segments[-1][0] - baseline) < .1 and rect.x0 <= segments[-1][1].x1 + .1:
             segments[-1][1] |= rect
         else:
             segments.append([baseline, rect])
-    return [rect + (.05, .05, -.05, -.05) for _, rect in segments]
+    return [rect + (.05, 0, -.05, 0) for _, rect in segments]
 
 
 def replace_match(doc, match, text):
