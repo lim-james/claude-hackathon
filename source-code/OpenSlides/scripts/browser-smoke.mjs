@@ -69,21 +69,48 @@ try{
  const history=await page.evaluate(async()=>{
   const storage=await import('/src/store/storage.ts');const {diffDecks}=await import('/src/model/diff.ts');
   const {useEditor,openDeck,mutate}=await import('/src/store/editor.ts');
+  // Raw access to the store idb-keyval uses, to plant and inspect records.
+  const idb=(mode,fn)=>new Promise((res,rej)=>{const open=indexedDB.open('keyval-store');open.onerror=()=>rej(open.error);open.onsuccess=()=>{const tx=open.result.transaction('keyval',mode);const r=fn(tx.objectStore('keyval'));tx.oncomplete=()=>{open.result.close();res(r.result);};tx.onerror=()=>rej(tx.error);};});
   const deck=useEditor.getState().deck,titleBefore=deck.title;
   const v=await storage.saveVersion(deck,'smoke snapshot');
   mutate(d=>{d.title='Changed for history test';});
-  const diff=diffDecks(v.deck,useEditor.getState().deck);
-  const listed=(await storage.listVersions(deck.id)).some(x=>x.id===v.id);
-  openDeck({...structuredClone(v.deck),updatedAt:Date.now()});
+  const list=await storage.listVersions(deck.id),mine=list.find(x=>x.id===v.id);
+  const saved=await storage.loadVersionDeck(deck.id,v.id);
+  const diff=diffDecks(saved,useEditor.getState().deck);
+  openDeck({...saved,updatedAt:Date.now()});
   const restoredTitle=useEditor.getState().deck.title;
   await storage.deleteVersion(deck.id,v.id);
-  const deleted=!(await storage.listVersions(deck.id)).some(x=>x.id===v.id);
-  return {listed,titleChanged:!!diff.titleChange,restoredTitle,titleBefore,deleted};
+  const deleted=!(await storage.listVersions(deck.id)).some(x=>x.id===v.id)&&!(await storage.loadVersionDeck(deck.id,v.id));
+  // A version saved by an earlier release keeps the whole deck inside its list record.
+  const oldKey=`version:${deck.id}:old1`;
+  await idb('readwrite',s=>s.put({id:'old1',deckId:deck.id,createdAt:1,label:'old release',deck:{...structuredClone(saved),title:'Old shape'}},oldKey));
+  const oldBeforeList=(await storage.loadVersionDeck(deck.id,'old1'))?.title;
+  const old=(await storage.listVersions(deck.id)).find(x=>x.id==='old1');
+  const oldRecord=await idb('readonly',s=>s.get(oldKey));
+  const oldAfterList=(await storage.loadVersionDeck(deck.id,'old1'))?.title;
+  // Only the newest MAX_VERSIONS are kept: the old one is the oldest, so it goes.
+  for(let i=0;i<storage.MAX_VERSIONS;i++)await storage.saveVersion(deck,`v${i}`);
+  const kept=await storage.listVersions(deck.id);
+  const oldDropped=!kept.some(x=>x.id==='old1')&&!(await storage.loadVersionDeck(deck.id,'old1'));
+  for(const x of kept)await storage.deleteVersion(deck.id,x.id);
+  const leftover=(await idb('readonly',s=>s.getAllKeys())).filter(k=>String(k).startsWith('version')).length;
+  return {listed:!!mine,listedHoldsDeck:list.some(x=>'deck' in x),slideCount:mine?.slideCount,slides:deck.slides.length,titleChanged:!!diff.titleChange,restoredTitle,titleBefore,deleted,
+   oldBeforeList,oldAfterList,oldLabel:old?.label,oldSlideCount:old?.slideCount,oldRecordHoldsDeck:!!oldRecord&&'deck' in oldRecord,kept:kept.length,max:storage.MAX_VERSIONS,oldDropped,leftover};
  });
  assert.ok(history.listed,'saved version is listed');
+ assert.equal(history.listedHoldsDeck,false,'the version list carries no deck');
+ assert.equal(history.slideCount,history.slides,'the list knows the slide count without the deck');
  assert.ok(history.titleChanged,'diff detected the edit after the snapshot');
  assert.equal(history.restoredTitle,history.titleBefore,'restore brought back the snapshot');
- assert.ok(history.deleted,'deleting a version removes it');
+ assert.ok(history.deleted,'deleting a version removes it and its deck');
+ assert.equal(history.oldBeforeList,'Old shape','a version from an earlier release loads before it is listed');
+ assert.equal(history.oldLabel,'old release','a version from an earlier release is listed');
+ assert.equal(history.oldSlideCount,history.slides,'and shows its slide count');
+ assert.equal(history.oldRecordHoldsDeck,false,'listing moves its deck out of the list record');
+ assert.equal(history.oldAfterList,'Old shape','and it still loads afterwards');
+ assert.equal(history.kept,history.max,'only the newest versions are kept');
+ assert.ok(history.oldDropped,'the oldest version is dropped with its deck');
+ assert.equal(history.leftover,0,'deleting every version leaves no version records');
  await page.setViewportSize({width:1024,height:768});
  const exportButton=page.getByRole('button',{name:'Export',exact:false}).first();const presentButton=page.getByRole('button',{name:'Present',exact:true});
  for(const button of [exportButton,presentButton]){const b=await button.boundingBox();assert.ok(b&&b.x>=0&&b.x+b.width<=1024,'Primary action is outside laptop viewport');}

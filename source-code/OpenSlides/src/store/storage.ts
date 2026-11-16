@@ -1,4 +1,4 @@
-import { del, get, keys, set } from 'idb-keyval';
+import { delMany, get, getMany, keys, set, setMany } from 'idb-keyval';
 import type { Deck } from '../model/types';
 import { uid } from '../model/factory';
 import { useEditor } from './editor';
@@ -19,20 +19,29 @@ export async function loadDeck(id: string): Promise<Deck | undefined> {
 
 export async function deleteDeck(id: string): Promise<void> {
   await scheduler.forget(id); // an unsaved or failed edit must not store the deck again
-  await del(deckKey(id));
-  for (const v of await listVersions(id)) await deleteVersion(id, v.id);
+  const versionKeys = (await keys()).filter(
+    (k) => typeof k === 'string' && (k.startsWith(versionPrefix(id)) || k.startsWith(versionDeckPrefix(id))),
+  );
+  await delMany([deckKey(id), ...versionKeys]);
 }
 
 // Version history: named snapshots of a deck, kept alongside it in IndexedDB.
+// Each version is two records: a small one the list reads (label, date, slide
+// count) and the deck itself, read only to compare or restore that version.
 export interface DeckVersion {
   id: string;
   deckId: string;
   createdAt: number;
   label: string;
-  deck: Deck;
+  slideCount: number;
 }
 
+/** A version keeps a full copy of the deck, so only the newest ones are kept. */
+export const MAX_VERSIONS = 20;
+
 const versionPrefix = (deckId: string) => `version:${deckId}:`;
+// Must not start with "deck:" or "version:", which listDecks and listVersions scan for.
+const versionDeckPrefix = (deckId: string) => `versiondeck:${deckId}:`;
 
 export async function saveVersion(deck: Deck, label = ''): Promise<DeckVersion> {
   const version: DeckVersion = {
@@ -40,9 +49,19 @@ export async function saveVersion(deck: Deck, label = ''): Promise<DeckVersion> 
     deckId: deck.id,
     createdAt: Date.now(),
     label: label.trim(),
-    deck: structuredClone(deck),
+    slideCount: deck.slides.length,
   };
-  await set(`${versionPrefix(deck.id)}${version.id}`, version);
+  // One transaction, so a version never exists without its deck.
+  await setMany([
+    [`${versionDeckPrefix(deck.id)}${version.id}`, deck],
+    [`${versionPrefix(deck.id)}${version.id}`, version],
+  ]);
+  // Counting keys is cheap; the records are read only when some must go.
+  const count = (await keys()).filter((k) => typeof k === 'string' && k.startsWith(versionPrefix(deck.id))).length;
+  if (count > MAX_VERSIONS) {
+    const extra = (await listVersions(deck.id)).filter((v) => v.id !== version.id).slice(MAX_VERSIONS - 1);
+    for (const old of extra) await deleteVersion(deck.id, old.id);
+  }
   return version;
 }
 
@@ -50,14 +69,37 @@ export async function listVersions(deckId: string): Promise<DeckVersion[]> {
   const all = (await keys()).filter(
     (k) => typeof k === 'string' && k.startsWith(versionPrefix(deckId)),
   ) as string[];
-  const versions = (await Promise.all(all.map((k) => get(k)))) as (DeckVersion | undefined)[];
-  return versions
-    .filter((v): v is DeckVersion => !!v && !!v.deck)
-    .sort((a, b) => b.createdAt - a.createdAt);
+  const records = (await getMany(all)) as ((DeckVersion & { deck?: Deck }) | undefined)[];
+  const versions: DeckVersion[] = [];
+  for (const [i, record] of records.entries()) {
+    if (!record) continue;
+    const { deck, ...version } = record;
+    if (deck) {
+      // Saved before versions were split in two: move the deck to its own
+      // record once. Both writes share a transaction, so an interrupted
+      // conversion leaves the old record as it was.
+      version.slideCount = deck.slides.length;
+      await setMany([
+        [`${versionDeckPrefix(deckId)}${version.id}`, deck],
+        [all[i], version],
+      ]);
+    }
+    versions.push(version);
+  }
+  return versions.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+/** The deck a version holds; read when the user compares or restores it. */
+export async function loadVersionDeck(deckId: string, versionId: string): Promise<Deck | undefined> {
+  const deck = (await get(`${versionDeckPrefix(deckId)}${versionId}`)) as Deck | undefined;
+  if (deck) return deck;
+  // A version saved before the split that has not been listed yet.
+  const old = (await get(`${versionPrefix(deckId)}${versionId}`)) as { deck?: Deck } | undefined;
+  return old?.deck;
 }
 
 export async function deleteVersion(deckId: string, versionId: string): Promise<void> {
-  await del(`${versionPrefix(deckId)}${versionId}`);
+  await delMany([`${versionPrefix(deckId)}${versionId}`, `${versionDeckPrefix(deckId)}${versionId}`]);
 }
 
 export async function listDecks(): Promise<Deck[]> {

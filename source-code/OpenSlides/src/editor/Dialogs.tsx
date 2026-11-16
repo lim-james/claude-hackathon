@@ -4,7 +4,7 @@ import { mutate, openDeck, setToast, useEditor } from '../store/editor';
 import { editElements, enterLayoutEditing } from '../store/actions';
 import { SIZE_PRESETS } from '../model/factory';
 import { resizeDeck } from '../model/resize';
-import { saveDeck, saveVersion, listVersions, deleteVersion, type DeckVersion } from '../store/storage';
+import { saveDeck, saveVersion, listVersions, loadVersionDeck, deleteVersion, MAX_VERSIONS, type DeckVersion } from '../store/storage';
 import { diffDecks, type DeckDiff } from '../model/diff';
 import { navigate } from '../router';
 import type { ChartData, ChartElement } from '../model/types';
@@ -76,10 +76,19 @@ function VersionsDialog({ onClose }: { onClose: () => void }) {
 
   const restore = async (v: DeckVersion) => {
     if (!confirm('Restore this version? Your current deck is saved as a version first, so you can undo this.')) return;
+    // Read it before saving: that save may drop this version as the oldest.
+    const saved = await loadVersionDeck(deck.id, v.id);
+    if (!saved) return void setToast('This version could not be read');
     await saveVersion(deck, 'Before restore');
-    openDeck({ ...structuredClone(v.deck), updatedAt: Date.now() });
+    openDeck({ ...saved, updatedAt: Date.now() });
     onClose();
     setToast('Version restored');
+  };
+
+  const compare = async (v: DeckVersion) => {
+    const saved = await loadVersionDeck(deck.id, v.id);
+    if (!saved) return void setToast('This version could not be read');
+    setDiffView({ version: v, diff: diffDecks(saved, deck) });
   };
 
   const remove = async (v: DeckVersion) => {
@@ -127,7 +136,7 @@ function VersionsDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Modal title="Version history" onClose={onClose} wide>
-      <p className="small">Save a snapshot of this deck, then restore or compare it later. Snapshots stay on this device and are never uploaded.</p>
+      <p className="small">Save a snapshot of this deck, then restore or compare it later. Snapshots stay on this device and are never uploaded. The newest {MAX_VERSIONS} are kept; saving another removes the oldest.</p>
       <div className="version-save">
         <input
           placeholder="Optional label (e.g. “Before client review”)"
@@ -146,11 +155,11 @@ function VersionsDialog({ onClose }: { onClose: () => void }) {
               <div className="version-meta">
                 <strong>{v.label || 'Untitled version'}</strong>
                 <span className="muted small">
-                  {fmt(v.createdAt)} · {v.deck.slides.length} slide{v.deck.slides.length === 1 ? '' : 's'}
+                  {fmt(v.createdAt)} · {v.slideCount} slide{v.slideCount === 1 ? '' : 's'}
                 </span>
               </div>
               <div className="version-actions">
-                <button className="btn" onClick={() => setDiffView({ version: v, diff: diffDecks(v.deck, deck) })}>
+                <button className="btn" onClick={() => void compare(v)}>
                   Compare
                 </button>
                 <button className="btn" onClick={() => void restore(v)}>Restore</button>
