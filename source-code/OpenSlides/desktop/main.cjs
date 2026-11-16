@@ -3,6 +3,7 @@ const {app,BrowserWindow,protocol,ipcMain,safeStorage,session}=require('electron
 const fs=require('node:fs/promises');
 const path=require('node:path');
 const {callAnthropic}=require('./anthropic.cjs');
+const {grantsPermission}=require('./permissions.cjs');
 const suiteMode=process.env.OPENSUITE_MODE==='1';
 const ROOT=path.join(__dirname,'..','dist');
 // Preserve the profile and origin so saved decks and encrypted keys survive the rename.
@@ -22,7 +23,9 @@ const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.json
 const keyPath=()=>path.join(app.getPath('userData'),'anthropic-key.enc');
 const canEncrypt=()=>safeStorage.isEncryptionAvailable()&&(process.platform!=='linux'||safeStorage.getSelectedStorageBackend()!=='basic_text');
 function trusted(event){if(!mainWindow||event.sender!==mainWindow.webContents||event.senderFrame!==event.sender.mainFrame)throw new Error('Untrusted request.');const u=new URL(event.senderFrame.url);if(u.protocol!=='deckforge:'||u.host!=='app')throw new Error('Untrusted origin.');}
+const ownContents=new WeakSet();
 function guardWindow(win){
+  ownContents.add(win.webContents);
   win.webContents.on('will-navigate',(event,url)=>{const u=new URL(url);if(u.protocol!=='deckforge:'||u.host!=='app')event.preventDefault();});
   win.webContents.on('will-attach-webview',event=>event.preventDefault());
 }
@@ -41,8 +44,8 @@ async function createWindow(){
   if(!suiteMode&&process.argv.includes('--smoke-test')){
     const timeout=setTimeout(()=>app.exit(1),30000);
     try{
-      const result=await mainWindow.webContents.executeJavaScript(`(async()=>{await document.fonts.ready;for(let i=0;i<100;i++){if(document.querySelector('.template-card'))break;await new Promise(r=>setTimeout(r,50));}const hasUI=!!document.querySelector('.template-card');const bridge=window.deckforgeDesktop;const status=await bridge.keyStatus();return {hasUI,bridge:!!bridge,configured:status.configured,title:document.title};})()`);
-      console.log('Desktop smoke:',JSON.stringify(result));clearTimeout(timeout);app.exit(result.hasUI&&result.bridge&&result.title==='OpenSlides'?0:1);
+      const result=await mainWindow.webContents.executeJavaScript(`(async()=>{await document.fonts.ready;for(let i=0;i<100;i++){if(document.querySelector('.template-card'))break;await new Promise(r=>setTimeout(r,50));}const hasUI=!!document.querySelector('.template-card');const bridge=window.deckforgeDesktop;const status=await bridge.keyStatus();let fullscreen=false;try{await Promise.race([document.documentElement.requestFullscreen(),new Promise((_,no)=>setTimeout(no,5000))]);fullscreen=!!document.fullscreenElement;await document.exitFullscreen();}catch{}const notifications=await Notification.requestPermission();return {hasUI,bridge:!!bridge,configured:status.configured,title:document.title,fullscreen,notifications};})()`,true);
+      console.log('Desktop smoke:',JSON.stringify(result));clearTimeout(timeout);app.exit(result.hasUI&&result.bridge&&result.title==='OpenSlides'&&result.fullscreen&&result.notifications==='denied'?0:1);
     }catch{clearTimeout(timeout);app.exit(1);}
   }
 }
@@ -55,7 +58,7 @@ app.whenReady().then(async()=>{
     if(!file.startsWith(ROOT+path.sep))return new Response('Forbidden',{status:403});
     try{return new Response(await fs.readFile(file),{headers:{'content-type':mime[path.extname(file)]||'application/octet-stream','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-src 'none'"}});}catch{return new Response('Not found',{status:404});}
   });
-  session.defaultSession.setPermissionRequestHandler((_wc,_permission,callback)=>callback(false));
+  session.defaultSession.setPermissionRequestHandler((wc,permission,callback,details)=>callback(grantsPermission(permission,!!wc&&ownContents.has(wc),details)));
   session.defaultSession.setPermissionCheckHandler(()=>false);
   try{if(canEncrypt())apiKey=safeStorage.decryptString(await fs.readFile(keyPath()));}catch{/* missing/rotated OS credentials: ask for a key */}
   apiKey ||= process.env.ANTHROPIC_API_KEY||'';
