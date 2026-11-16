@@ -7,6 +7,9 @@
   "description": "OpenSuite \u2014 OpenPDF and OpenSlides in one local workspace",
   "author": "OpenSuite contributors",
   "main": "source-code/main/desktop/main.cjs",
+  "engines": {
+    "node": "^22.18.0 || ^24"
+  },
   "scripts": {
     "build:web": "node scripts/build-web.mjs",
     "build:desktop": "node scripts/build-desktop.mjs",

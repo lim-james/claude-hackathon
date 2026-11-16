@@ -256,7 +256,7 @@ Binaries are compiled for **Windows x64** and **Linux x64**:
 
 ### Prerequisites
 
-* **Node.js**: `v20.x` or `v24.x`
+* **Node.js**: `v22.18+` (22.x line) or `v24.x`
 
 * **Python**: `3.11+` / `3.12`
 
