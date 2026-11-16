@@ -80,6 +80,43 @@ class HeaderFooterBatesTests(unittest.TestCase):
         finally:
             pdf.close()
 
+    UNSUPPORTED = ['Budget \u20ac 2027', 'Draft \u2014 v2', '\u041e\u0442\u0447\u0451\u0442 2027',
+                   '\u6a5f\u5bc6 2027', 'a\tb', 'a\x7fb', 'a\x80b', 'a\x97b']
+
+    def test_unsupported_characters_are_refused_before_any_page_is_stamped(self):
+        stamps = {
+            'header': lambda pdf, text: pdf.apply_header_footer({'header-left': text}),
+            'filename': lambda pdf, text: pdf.apply_header_footer(
+                {'header-left': 'kept', 'footer-left': '<filename>'}, filename=text + '.pdf'),
+            'bates prefix': lambda pdf, text: pdf.bates_number(prefix=text + '-'),
+            'bates suffix': lambda pdf, text: pdf.bates_number(suffix='-' + text),
+        }
+        for text in self.UNSUPPORTED:
+            for name, stamp in stamps.items():
+                with self.subTest(text=text, stamp=name):
+                    pdf = self.make(3)
+                    try:
+                        with self.assertRaisesRegex(ValueError, 'Latin-1'):
+                            stamp(pdf, text)
+                        self.assertEqual([self.page_text(pdf, i) for i in range(3)], ['', '', ''])
+                    finally:
+                        pdf.close()
+
+    def test_latin1_text_stamps_as_typed(self):
+        text = 'Caf\u00e9 Z\u00fcrich'
+        pdf = self.make(1)
+        try:
+            pdf.apply_header_footer({'header-left': text, 'footer-left': '<filename>'}, filename=text + '.pdf')
+            pdf.bates_number(prefix=text + '-')
+            pdf.restore(pdf.bytes())
+            stamped = self.page_text(pdf, 0)
+            self.assertIn(text + '\n', stamped)
+            self.assertIn(text + '.pdf', stamped)
+            self.assertIn(text + '-000001', stamped)
+        finally:
+            pdf.close()
+
+
 
 if __name__ == '__main__':
     unittest.main()

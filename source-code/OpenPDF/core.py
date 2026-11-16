@@ -415,6 +415,13 @@ class PDF:
         y = margin if band in ('header', 'top') else page.rect.height - margin
         page.insert_text((x, y), text, fontsize=size, fontname=font, color=color)
 
+    @staticmethod
+    def _require_stampable(text):
+        # The built-in fonts stamp only printable Latin-1; anything else lands on
+        # the page as a dot or another glyph, so refuse it before any page changes.
+        if any(ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or ord(c) > 255 for c in text):
+            raise ValueError('Header, footer and Bates text currently supports Latin-1 characters only.')
+
     def apply_header_footer(self, slots, filename='', size=10, color=(0, 0, 0),
                             font='helv', margin=36, first=None, last=None):
         if not any((slots.get(k) or '').strip() for k in self.HEADER_FOOTER_SLOTS):
@@ -425,6 +432,8 @@ class PDF:
         def expand(template, index):
             return (template.replace('<page>', str(index + 1)).replace('<pages>', str(total))
                             .replace('<date>', today).replace('<filename>', filename))
+        for template in (slots.get(k) or '' for k in self.HEADER_FOOTER_SLOTS):
+            self._require_stampable(expand(template.strip(), first))
         for index in range(first, last + 1):
             page = self.doc[index]
             for slot in self.HEADER_FOOTER_SLOTS:
@@ -444,6 +453,7 @@ class PDF:
             raise ValueError('Use at least one digit.')
         if position not in self.BATES_POSITIONS:
             raise ValueError('Unknown Bates position.')
+        self._require_stampable(f'{prefix}{suffix}')
         first, last = self._range(first, last)
         band, align = position.split('-')
         counter = start
