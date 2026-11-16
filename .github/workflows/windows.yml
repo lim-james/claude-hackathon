@@ -165,21 +165,6 @@ jobs:
         with:
           name: Checksums-Windows
           path: release/SHA256SUMS.txt
-      - name: Publish Windows release
-        if: github.ref == 'refs/heads/master'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          if (-not $version) { throw 'No version in package.json' }
-          $tag = "v$version"
-          gh release view $tag > $null 2>&1
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "::notice::Release $tag already exists; skipping publish. Bump 'version' in package.json to cut a new release."
-          } else {
-            gh release create $tag release/*.exe release/SHA256SUMS.txt --target '${{ github.sha }}' --title "OpenSuite $tag" --notes-file source-code/OpenPDF/RELEASE-NOTES.md --latest
-            if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
-          }
   linux:
     needs: verify
     runs-on: ubuntu-24.04
@@ -274,26 +259,31 @@ jobs:
         with:
           name: Checksums-Linux
           path: release/SHA256SUMS-linux.txt
-  linux-release:
+  # The only job that publishes. It needs both platform builds, so a release is
+  # either complete (Windows and Linux files) or absent.
+  release:
     if: github.ref == 'refs/heads/master'
     needs: [windows, linux]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-Windows'
+          path: release-files
+          merge-multiple: true
       - uses: actions/download-artifact@v4
         with:
           pattern: '*-Linux'
-          path: release
+          path: release-files
           merge-multiple: true
-      - name: Attach Linux builds to this commit's release
+      - name: Publish the release with every platform's files
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          tag=$(gh api "repos/${{ github.repository }}/releases?per_page=100" --jq '[.[] | select(.target_commitish == "${{ github.sha }}")][0].tag_name')
-          if [ -z "$tag" ] || [ "$tag" = null ]; then echo '::notice::No release for this commit (version unchanged); skipping Linux upload.'; exit 0; fi
-          gh release upload "$tag" release/* --repo "${{ github.repository }}" --clobber
+        run: node scripts/publish-release.mjs release-files
   homepage:
     if: github.ref == 'refs/heads/master'
-    needs: [verify, windows]
+    needs: [verify, release]
     runs-on: ubuntu-latest
     environment:
       name: github-pages
