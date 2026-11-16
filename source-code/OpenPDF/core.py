@@ -14,6 +14,7 @@ import fitz
 from PIL import Image
 from text_tools import find_matches, replace_match, select_text
 from rich_boxes import apply_redactions
+from outline_tools import append_bookmarks, copied_bookmarks
 
 
 def page_numbers(spec, count):
@@ -131,7 +132,10 @@ class PDF:
         for path in paths:
             source = PDF(path)
             try:
+                first_page = len(self.doc)
                 self.doc.insert_pdf(source.doc)
+                # insert_pdf copies pages only; the file's bookmarks follow them.
+                append_bookmarks(self.doc, copied_bookmarks(source.doc, first_page))
             finally:
                 source.close()
 

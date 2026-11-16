@@ -5,7 +5,11 @@
 destinations on pages with an offset crop or media box. Here new outline
 objects are appended and linked in; existing objects keep their content.
 """
+import re
 import fitz
+
+# The part of a destination after its page: a fit mode and its numbers.
+_VIEW = re.compile(r'/(XYZ|FitBH|FitBV|FitB|FitH|FitV|FitR|Fit)((?: (?:null|-?\d+\.?\d*|-?\.\d+)){0,4})$')
 
 
 def _ref(doc, xref, key):
@@ -57,6 +61,93 @@ def _destination(doc, page_number, point):
     return f'/A<</S/GoTo/D[{page.xref} 0 R/XYZ {target.x:g} {target.y:g} 0]>>'
 
 
+def _target(doc, page, options):
+    """What a new item opens and how it is drawn, as PDF dictionary entries."""
+    text = ''
+    if options.get('uri'):
+        text = f"/A<</S/URI/URI{fitz.get_pdf_str(str(options['uri']))}>>"
+    elif page != -1 and options.get('view'):
+        text = f"/A<</S/GoTo/D[{doc.page_xref(page - 1)} 0 R{options['view']}]>>"
+    elif page != -1:
+        text = _destination(doc, page - 1, options.get('point') or (72, 36))
+    if options.get('color'):
+        red, green, blue = (min(1.0, max(0.0, float(part))) for part in options['color'])
+        text += f'/C[{red:g} {green:g} {blue:g}]'
+    flags = (1 if options.get('italic') else 0) | (2 if options.get('bold') else 0)
+    return text + (f'/F {flags}' if flags else '')
+
+
+def _view(text):
+    """``/XYZ 72 500 0`` from the tail of a destination array, or '' when it is anything else."""
+    tokens = ' '.join(re.findall(r'/[^\s/\[\]]+|[^\s/\[\]]+', text))
+    return tokens if _VIEW.match(tokens) else ''
+
+
+def _source_destination(doc, xref, pages, names):
+    """(0-based page, view) an outline item of ``doc`` jumps to, or None."""
+    kind, value = doc.xref_get_key(xref, 'Dest')
+    if kind == 'null' and doc.xref_get_key(xref, 'A/S') == ('name', '/GoTo'):
+        kind, value = doc.xref_get_key(xref, 'A/D')
+    if kind == 'xref':  # the destination is an object of its own
+        value = doc.xref_object(int(value.split()[0]), compressed=True)
+        kind = 'array' if value.startswith('[') else 'dict'
+    if kind == 'dict':  # a named destination's dictionary form
+        match = re.search(r'/D\s*(\[[^\]]*\])', value)
+        kind, value = ('array', match.group(1)) if match else ('null', '')
+    if kind == 'array':
+        match = re.match(r'\[\s*(\d+) 0 R(.*)\]$', value, re.S)
+        if match and int(match.group(1)) in pages:
+            return pages[int(match.group(1))], _view(match.group(2))
+    elif kind in ('name', 'string'):
+        found = names().get(value[1:] if kind == 'name' else value)
+        if found and isinstance(found.get('page'), int) and 0 <= found['page'] < doc.page_count:
+            if 'to' in found:
+                x, y = found['to']
+                return found['page'], _view(f"/XYZ {x:g} {y:g} {found.get('zoom', 0):g}")
+            return found['page'], _view(found.get('dest', ''))
+    return None
+
+
+def copied_bookmarks(source, first_page):
+    """Entries for ``append_bookmarks`` that repeat the outline of ``source``.
+
+    For a document whose pages were inserted, in order and unchanged, starting
+    at 0-based page ``first_page`` of another one. A bookmark keeps its title,
+    level, colour, bold and italic. One that jumps to a page keeps the exact
+    position and zoom: the view is copied as written, which is right because
+    the inserted page has the same boxes and rotation. Web links stay web
+    links. A bookmark that does anything else (another file, a script, a
+    destination that cannot be read) is kept as a title that opens nothing, or
+    the top of its page when the page is known.
+    """
+    pages = {source.page_xref(number): number for number in range(source.page_count)}
+    cache = []
+
+    def names():
+        if not cache:
+            cache.append(source.resolve_names())
+        return cache[0]
+
+    entries = []
+    for level, title, _, info in source.get_toc(simple=False):
+        options = {key: info[key] for key in ('color', 'bold', 'italic') if info.get(key)}
+        page = -1
+        xref = info.get('xref', 0)
+        if xref and source.xref_get_key(xref, 'A/S') == ('name', '/URI') and info.get('uri'):
+            options['uri'] = info['uri']
+        elif xref:
+            found = _source_destination(source, xref, pages, names)
+            if found:
+                page, options['view'] = first_page + found[0] + 1, found[1]
+            else:
+                known = info.get('page')
+                if (info.get('kind') in (fitz.LINK_GOTO, fitz.LINK_NAMED) and isinstance(known, int)
+                        and 0 <= known < source.page_count):
+                    page = first_page + known + 1
+        entries.append([level, title, page, options])
+    return entries
+
+
 def append_bookmarks(doc, entries):
     """Append bookmarks after the existing ones and return how many were added.
 
@@ -65,6 +156,12 @@ def append_bookmarks(doc, entries):
     (default: the top). The first entry must be level 1 and a level may only
     go one deeper than the entry before it; deeper entries become children of
     the appended entry above them and start collapsed.
+
+    Instead of a point the fourth item may be a dict: ``point`` as above;
+    ``view``, the destination after its page exactly as the PDF stores it
+    (``/XYZ 72 500 2``, ``/FitH 300``), in the page's own coordinates; ``uri``
+    for a web link; ``color`` as (red, green, blue) from 0 to 1; ``bold`` and
+    ``italic``. Page -1 makes a bookmark that opens no page.
     """
     entries = [list(entry) for entry in entries]
     if not entries:
@@ -73,27 +170,33 @@ def append_bookmarks(doc, entries):
     for level, title, page, *rest in entries:
         if not isinstance(level, int) or not 1 <= level <= previous + 1:
             raise ValueError(f'Bookmark "{title}" has level {level} after level {previous}.')
-        if not isinstance(page, int) or not 1 <= page <= doc.page_count:
+        if not isinstance(page, int) or not (page == -1 or 1 <= page <= doc.page_count):
             raise ValueError(f'Bookmark "{title}" points to page {page} of {doc.page_count}.')
+        options = rest[0] if rest and isinstance(rest[0], dict) else {}
+        if options.get('view') and not _VIEW.match(options['view']):
+            raise ValueError(f'Bookmark "{title}" has an unreadable destination.')
         previous = level
     root = _root(doc)
     old_last = _last_top_item(doc, root)
     nodes = [{'xref': root, 'first': 0, 'last': 0, 'count': 0}]
+    by_xref = {}
     newest = {0: nodes[0]}  # most recent node per level; level 0 is the root
     for level, title, page, *rest in entries:
         parent = newest[level - 1]
+        options = rest[0] if rest and isinstance(rest[0], dict) else {'point': rest[0] if rest else None}
         node = {'xref': doc.get_new_xref(), 'parent': parent['xref'], 'first': 0, 'last': 0, 'count': 0,
                 'prev': parent['last'], 'next': 0, 'title': fitz.get_pdf_str(str(title)),
-                'dest': _destination(doc, page - 1, rest[0] if rest else (72, 36))}
+                'dest': _target(doc, page, options)}
         # Reserve the number: get_new_xref returns the same one until it is used.
         doc.update_object(node['xref'], '<<>>')
         if parent['last']:
-            next(n for n in nodes if n['xref'] == parent['last'])['next'] = node['xref']
+            by_xref[parent['last']]['next'] = node['xref']
         else:
             parent['first'] = node['xref']
         parent['last'] = node['xref']
         parent['count'] += 1
         newest[level] = node
+        by_xref[node['xref']] = node
         nodes.append(node)
     top = [node for node in nodes[1:] if node['parent'] == root]
     if old_last:

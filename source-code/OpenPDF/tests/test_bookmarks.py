@@ -177,5 +177,143 @@ class BookmarkTests(unittest.TestCase):
         self.assertEqual(outline(self.pdf.doc), before)
 
 
+class MergeBookmarkTests(unittest.TestCase):
+    """Merge brings the bookmarks of the files it adds, on their new pages."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.pdf = PDF()
+        for _ in range(2):
+            self.pdf.doc.new_page()
+        self.pdf.doc.set_toc([[1, 'Report', 1]])
+
+    def tearDown(self):
+        self.pdf.close()
+        self.tmp.cleanup()
+
+    def file(self, name, toc, pages=2, edit=None):
+        doc = fitz.open()
+        for _ in range(pages):
+            doc.new_page()
+        doc.set_toc(toc, collapse=0)
+        if edit:
+            edit(doc)
+        path = Path(self.tmp.name) / name
+        doc.save(path)
+        doc.close()
+        return str(path)
+
+    def appendix(self):
+        return self.file('appendix.pdf', [[1, 'Appendix A', 1], [1, 'Appendix B', 2]])
+
+    def test_merged_bookmarks_follow_their_pages(self):
+        self.pdf.merge([self.appendix()])
+        self.assertEqual(len(self.pdf.doc), 4)
+        self.assertEqual(self.pdf.doc.get_toc(), [[1, 'Report', 1], [1, 'Appendix A', 3], [1, 'Appendix B', 4]])
+
+    def test_open_document_without_bookmarks(self):
+        plain = PDF()
+        plain.doc.new_page()
+        plain.merge([self.appendix()])
+        self.assertEqual(plain.doc.get_toc(), [[1, 'Appendix A', 2], [1, 'Appendix B', 3]])
+        plain.close()
+
+    def test_two_files_in_one_call_and_nested_levels(self):
+        nested = self.file('nested.pdf', [[1, 'Part', 1], [2, 'Chapter', 2], [3, 'Section', 3], [1, 'Index', 3]], pages=3)
+        self.pdf.merge([self.appendix(), nested])
+        self.assertEqual(len(self.pdf.doc), 7)
+        self.assertEqual(self.pdf.doc.get_toc(), [
+            [1, 'Report', 1], [1, 'Appendix A', 3], [1, 'Appendix B', 4],
+            [1, 'Part', 5], [2, 'Chapter', 6], [3, 'Section', 7], [1, 'Index', 7]])
+
+    def test_position_zoom_style_and_web_link_are_kept(self):
+        def style(doc):
+            doc[1].set_rotation(90)
+            doc[2].set_cropbox(fitz.Rect(50, 50, 500, 700))
+            toc = doc.get_toc(simple=False)
+            toc[0][3]['to'] = fitz.Point(72, 500)
+            toc[1][3].update(to=fitz.Point(72, 400), zoom=2.0, color=(1, 0, 0), bold=True, italic=True)
+            toc[2][3] = {'kind': fitz.LINK_URI, 'uri': 'https://example.com/a(b)'}
+            toc[3][3]['to'] = fitz.Point(100, 300)
+            doc.set_toc(toc, collapse=0)
+        path = self.file('styled.pdf', [[1, 'Mid page', 1], [2, 'Zoomed', 2], [1, 'Site', -1], [1, 'Cropped', 3]],
+                         pages=3, edit=style)
+        with fitz.open(path) as source:
+            expected = outline(source)
+            written = [source.xref_get_key(xref, 'A/D')[1].split('R', 1)[1] for xref in (source.get_outline_xrefs()[i] for i in (0, 1, 3))]
+            italic = [entry[3].get('italic') for entry in source.get_toc(simple=False)]
+        own = stored(self.pdf.doc)
+        self.pdf.merge([path])
+        merged = outline(self.pdf.doc)[1:]
+        # Same as in the source file apart from the page numbers, moved by 2.
+        self.assertEqual([(level, title, page if page < 0 else page - 2, dict(dest, page=dest['page'] - 2) if 'page' in dest else dest)
+                          for level, title, page, dest in merged], expected)
+        self.assertEqual(merged[0][3]['to'], fitz.Point(72, 500))
+        self.assertEqual((merged[1][3]['zoom'], merged[1][3]['color'], merged[1][3]['bold']), (2.0, (1.0, 0.0, 0.0), True))
+        self.assertEqual(merged[2][3]['uri'], 'https://example.com/a(b)')
+        self.assertEqual([entry[3].get('italic') for entry in self.pdf.doc.get_toc(simple=False)[1:]], italic)
+        # The view is the source's own text, on the copied page.
+        xrefs = self.pdf.doc.get_outline_xrefs()
+        self.assertEqual([self.pdf.doc.xref_get_key(xref, 'A/D')[1].split('R', 1)[1] for xref in (xrefs[1], xrefs[2], xrefs[4])], written)
+        # The open document's own bookmark only gained /Next.
+        self.assertEqual(stored(self.pdf.doc)[0].replace(f'/Next {xrefs[1]} 0 R', ''), own[0])
+        saved = Path(self.tmp.name) / 'merged.pdf'
+        self.pdf.save(saved)
+        with fitz.open(saved) as reopened:
+            self.assertEqual(outline(reopened)[1:], merged)
+
+    def test_file_without_bookmarks_changes_nothing(self):
+        before, objects = outline(self.pdf.doc), stored(self.pdf.doc)
+        self.pdf.merge([self.file('plain.pdf', [])])
+        self.assertEqual(len(self.pdf.doc), 4)
+        self.assertEqual(outline(self.pdf.doc), before)
+        self.assertEqual(stored(self.pdf.doc), objects)
+
+    def test_named_and_unsupported_destinations_keep_their_entry(self):
+        def rewire(doc):
+            first, second, third, fourth = doc.get_outline_xrefs()
+            catalog = doc.pdf_catalog()
+            doc.xref_set_key(catalog, 'Dests', f'<</old [{doc[1].xref} 0 R /FitH 300]>>')
+            tree = doc.get_new_xref()
+            doc.update_object(tree, f'<</Names[(new) <</D[{doc[2].xref} 0 R /XYZ 10 20 0]>>]>>')
+            doc.xref_set_key(catalog, 'Names', f'<</Dests {tree} 0 R>>')
+            doc.xref_set_key(first, 'A', 'null')
+            doc.xref_set_key(first, 'Dest', '/old')
+            action = doc.get_new_xref()
+            doc.update_object(action, '<</S/GoTo/D(new)>>')
+            doc.xref_set_key(second, 'A', f'{action} 0 R')
+            doc.xref_set_key(third, 'A', '<</S/JavaScript/JS(app.alert\\(1\\))>>')
+            doc.xref_set_key(fourth, 'A', '<</S/GoToR/F(other.pdf)/D[1 /Fit]>>')
+        path = self.file('named.pdf', [[1, 'Old name', 1], [1, 'New name', 1], [1, 'Script', 1], [1, 'Other file', 1]],
+                         pages=3, edit=rewire)
+        self.pdf.merge([path])
+        self.assertEqual(self.pdf.doc.get_toc()[1:],
+                         [[1, 'Old name', 4], [1, 'New name', 5], [1, 'Script', -1], [1, 'Other file', -1]])
+        xrefs = self.pdf.doc.get_outline_xrefs()[1:]
+        page = self.pdf.doc.page_xref
+        self.assertEqual(self.pdf.doc.xref_get_key(xrefs[0], 'A/D'), ('array', f'[{page(3)} 0 R/FitH 300]'))
+        self.assertEqual(self.pdf.doc.xref_get_key(xrefs[1], 'A/D'), ('array', f'[{page(4)} 0 R/XYZ 10 20 0]'))
+        # Scripts and links to other files are not copied: the title opens nothing.
+        for xref in xrefs[2:]:
+            self.assertEqual(self.pdf.doc.xref_get_key(xref, 'A')[0], 'null')
+            self.assertEqual(self.pdf.doc.xref_get_key(xref, 'Dest')[0], 'null')
+        self.assertNotIn('JavaScript', ''.join(stored(self.pdf.doc)))
+
+    def test_undo_after_merge_restores_pages_and_bookmarks(self):
+        before = outline(self.pdf.doc)
+        capture = getattr(self.pdf, 'snapshot', self.pdf.bytes)
+        state = capture()
+        self.pdf.merge([self.appendix()])
+        self.assertEqual(len(self.pdf.doc.get_toc()), 3)
+        self.pdf.restore(state)
+        self.assertEqual((len(self.pdf.doc), outline(self.pdf.doc)), (2, before))
+        # A second file that cannot be opened: the app restores the same way.
+        state = capture()
+        with self.assertRaises(Exception):
+            self.pdf.merge([self.appendix(), str(Path(self.tmp.name) / 'missing.pdf')])
+        self.pdf.restore(state)
+        self.assertEqual((len(self.pdf.doc), outline(self.pdf.doc)), (2, before))
+
+
 if __name__ == '__main__':
     unittest.main()
