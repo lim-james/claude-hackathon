@@ -427,7 +427,8 @@ export async function exportPptx(deck: Deck) {
 // Image and PDF export: render slides offscreen exactly as the editor draws them.
 // ---------------------------------------------------------------------------
 
-async function renderSlides<T>(deck: Deck, indices: number[], capture: (node: HTMLElement, fontEmbedCSS: string) => Promise<T>): Promise<T[]> {
+// Exported for scripts/browser-smoke.mjs, which checks the font CSS handed to `capture`.
+export async function renderSlides<T>(deck: Deck, indices: number[], capture: (node: HTMLElement, fontEmbedCSS: string) => Promise<T>): Promise<T[]> {
   const host = document.createElement('div');
   host.setAttribute('aria-hidden', 'true');
   host.style.cssText = 'position:fixed;left:-20000px;top:0;pointer-events:none;';
@@ -448,7 +449,9 @@ async function renderSlides<T>(deck: Deck, indices: number[], capture: (node: HT
     await document.fonts.ready;
     await Promise.all(Array.from(host.querySelectorAll('img')).map((img) => img.decode().catch(() => undefined)));
     const nodes = Array.from(host.querySelectorAll<HTMLElement>('[data-export]'));
-    const fontEmbedCSS = nodes.length ? await getFontEmbedCSS(nodes[0]) : '';
+    // Fonts of every exported slide, read once: html-to-image keeps the @font-face rules
+    // of the families used inside the element it is given, so it gets the wrapper of all slides.
+    const fontEmbedCSS = nodes.length ? await getFontEmbedCSS(host.firstElementChild as HTMLElement) : '';
     const out: T[] = [];
     for (const n of nodes) out.push(await capture(n, fontEmbedCSS));
     return out;

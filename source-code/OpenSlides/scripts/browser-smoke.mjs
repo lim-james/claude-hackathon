@@ -64,6 +64,20 @@ try{
   const {htmlToText}=await import('/src/model/resolve.ts');window.__injected=false;htmlToText('<img src="bad" onerror="window.__injected=true"><p>Safe</p>');await new Promise(r=>setTimeout(r,100));
   return {bytes:data.byteLength,media:Object.keys(zip.files).filter(f=>f.startsWith('ppt/media/')).length,slides:Object.keys(zip.files).filter(f=>/^ppt\/slides\/slide[0-9]+\.xml$/.test(f)).length,injected:window.__injected};
  });assert.ok(exports.bytes>5000);assert.ok(exports.media>=2);assert.equal(exports.slides,1);assert.equal(exports.injected,false);
+ // PNG and PDF exports embed the fonts of every exported slide, not only the first one's.
+ const exportFonts=await page.evaluate(async()=>{
+  const {renderSlides}=await import('/src/io/export.tsx');const {createFromTemplate}=await import('/src/model/templates.ts');const {resolveElement,getLayout}=await import('/src/model/resolve.ts');
+  const embeds=(css,family)=>css.split('@font-face').some(rule=>new RegExp(`font-family:\\s*["']?${family}["']?\\s*;`).test(rule)&&rule.includes('url("data:'));
+  const result={};
+  for(const family of ['JetBrains Mono','DejaVu Serif','Lora']){
+   const deck=createFromTemplate('marketing'),slide=deck.slides[1],title=slide.elements.find(e=>e.type==='text');
+   title.style={...resolveElement(title,getLayout(deck,slide.layoutId)).style,fontFamily:family};if(title.ph)title.ph.style=false;
+   const [first]=await renderSlides(deck,[0],async(_node,css)=>css);const both=await renderSlides(deck,[0,1],async(_node,css)=>css);
+   result[family]={onFirstSlide:embeds(first,family),embedded:both.map(css=>embeds(css,family))};
+  }
+  return result;
+ });
+ for(const [family,r] of Object.entries(exportFonts)){assert.equal(r.onFirstSlide,false,`${family} is not a font of slide 1`);assert.deepEqual(r.embedded,[true,true],`${family}, used on slide 2 only, is embedded in the export`);}
  await page.evaluate(async()=>{const {mutate,useEditor}=await import('/src/store/editor.ts');const {createFromTemplate}=await import('/src/model/templates.ts');const d=createFromTemplate('creative');mutate(deck=>{deck.title=d.title;deck.theme=d.theme;deck.layouts=d.layouts;deck.slides=d.slides;});useEditor.setState({slideId:d.slides[0].id,selection:[]});});
  await page.screenshot({path:'studio-smoke.png',fullPage:true});
  const history=await page.evaluate(async()=>{
