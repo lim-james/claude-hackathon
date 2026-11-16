@@ -958,9 +958,12 @@ class App(tk.Tk):
         path = fd.askopenfilename(filetypes=[('Form data', '*.xfdf *.fdf *.xml')])
         if not path:
             return
-        result = {}
-        self.change(lambda: result.update(count=self.pdf.import_form_data(path)), 'Form data imported.')
-        self.status.set(f'Imported {result["count"]} field value(s).')
+        result, refused = {}, []
+        self.change(lambda: result.update(count=self.pdf.import_form_data(path, refused)), 'Form data imported.')
+        status = f'Imported {result["count"]} field value(s).'
+        if refused:
+            status += ' Not imported: ' + '; '.join(f'{name} ({reason})' for name, reason in refused) + '.'
+        self.status.set(status)
 
     def redact(self):
         self.require()
