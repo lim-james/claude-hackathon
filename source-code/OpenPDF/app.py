@@ -1265,7 +1265,7 @@ class App(tk.Tk):
         for path in paths:  # ask here: no dialog may open from the worker thread
             try:
                 passwords[path] = self.ask_password(path)
-            except ValueError:
+            except Exception:  # refused, or not a PDF that can be opened at all
                 refused.append(path)
         chosen = [(path, target) for path, target in zip(paths, targets) if path not in refused]
         def done(result):

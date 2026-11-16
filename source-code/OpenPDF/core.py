@@ -5,7 +5,6 @@ import difflib
 import html
 import io
 import os
-import secrets
 import shutil
 import subprocess
 import sys
@@ -333,23 +332,21 @@ class PDF:
 
     @staticmethod
     def compress_files(paths, targets, passwords=None):
-        # Batch compress. A protected file is written protected again: with the
-        # password that opened it and the restrictions it had. A file that cannot
-        # be compressed is skipped and the rest still run.
+        # Batch compress. A file's encryption is written back as it is, so the
+        # copy opens with exactly the passwords that open the source (open
+        # password, permissions password, or none) and keeps its restrictions.
+        # A file that cannot be compressed is skipped and the rest still run.
         passwords = passwords or {}
-        everything = PDF.permission_mask(key for key, _label, _flags in PDF.PERMISSIONS)
         written, skipped = [], []
         for path, target in zip(paths, targets):
-            password = passwords.get(path, '')
             try:
-                pdf = PDF(path, password)
+                pdf = PDF(path, passwords.get(path, ''))
                 try:
-                    permissions = pdf.doc.permissions
-                    restricted = permissions & everything != everything
-                    # Restrictions only bind when the owner password differs from
-                    # the open password; the original owner password is unknown.
-                    pdf.save(target, password, owner_password=secrets.token_urlsafe(18) if restricted else '',
-                             permissions=permissions)
+                    # Nothing may read doc.needs_pass between opening and this
+                    # write: it retries the empty password, which replaces the
+                    # key, and the copy's pages would be written unreadable.
+                    PDF._atomic_write(target, pdf.doc.tobytes(garbage=4, deflate=True,
+                                                              encryption=fitz.PDF_ENCRYPT_KEEP))
                 finally:
                     pdf.close()
                 written.append(target)

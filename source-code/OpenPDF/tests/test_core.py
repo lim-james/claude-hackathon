@@ -1,3 +1,4 @@
+import itertools
 import tempfile
 import shutil
 import time
@@ -331,11 +332,41 @@ class ProtectedFileToolTests(unittest.TestCase):
         with fitz.open(self.targets[1]) as copy:
             self.assertTrue(copy.needs_pass)
             self.assertFalse(copy.authenticate(''))
-            self.assertFalse(copy.authenticate('boss'))  # the old permissions password is not carried over
+            self.assertEqual(copy.authenticate('boss'), 4)  # the permissions password still works
             self.assertEqual(copy.authenticate('hunter2'), 2)  # opens, without owner rights
             self.assertEqual(copy[0].get_text().strip(), 'Signed contract')
             everything = PDF.permission_mask(key for key, _label, _flags in PDF.PERMISSIONS)
             self.assertEqual(copy.permissions & everything, fitz.PDF_PERM_PRINT)
+
+    def test_batch_compress_copy_opens_with_exactly_what_opened_the_source(self):
+        everything = PDF.permission_mask(key for key, _label, _flags in PDF.PERMISSIONS)
+
+        def opening(path):
+            # What each password does to the file: (rights it gives, text it shows).
+            result = {}
+            for password in ('', 'hunter2', 'boss', 'wrong'):
+                with fitz.open(path) as doc:
+                    asked = doc.needs_pass
+                    rights = doc.authenticate(password)
+                    shown = doc[0].get_text().strip() if rights or not asked else None
+                    result[password] = (asked, rights, shown, doc.permissions & everything, (doc.metadata or {}).get('encryption'))
+            return result
+
+        sources = {'open password only': dict(user_pw='hunter2'),
+                   'permissions password only': dict(owner_pw='boss'),
+                   'both': dict(user_pw='hunter2', owner_pw='boss')}
+        methods = {'aes256': fitz.PDF_ENCRYPT_AES_256, 'aes128': fitz.PDF_ENCRYPT_AES_128, 'rc4': fitz.PDF_ENCRYPT_RC4_128}
+        for (kind, passwords), (method, encryption) in itertools.product(sources.items(), methods.items()):
+            source = self.make(f'{method} {kind}.pdf', 'Signed contract', encryption=encryption,
+                               permissions=fitz.PDF_PERM_PRINT, **passwords)
+            before = opening(source)
+            self.assertEqual(before['hunter2' if 'user_pw' in passwords else ''][2], 'Signed contract')
+            # Every password the prompt accepts; a file that opens without one is not asked about.
+            for typed in [p for p in ('hunter2', 'boss') if before[p][1]] if before[''][0] else ['']:
+                with self.subTest(source=kind, method=method, typed=typed):
+                    target = self.out / f'{method} {kind} {typed}.pdf'
+                    self.assertEqual(PDF.compress_files([source], [target], {source: typed}), ([target], []))
+                    self.assertEqual(opening(target), before)
 
     def test_batch_compress_skips_a_file_it_cannot_open_and_compresses_the_rest(self):
         written, skipped = PDF.compress_files(self.paths, self.targets, {self.contract: 'wrong'})
@@ -397,6 +428,20 @@ class ProtectedFileToolTests(unittest.TestCase):
             self.assertEqual(self.status[-1], f'Compressed {count} PDFs. Already optimized files may not shrink.{note}')
         with fitz.open(folder / 'contract-compressed.pdf') as copy:
             self.assertTrue(copy.needs_pass)
+
+    def test_app_batch_skips_a_broken_pdf_and_still_compresses_the_rest(self):
+        broken = self.root / 'broken.pdf'
+        broken.write_bytes(b'this is not a PDF')
+        started = []
+        App, app, dialog = self.app('hunter2', background=lambda work, done, message: started.append((work, done)))
+        with dialog as ask, patch('app.fd.askopenfilenames', return_value=(self.paths[2], str(broken), self.contract)), \
+                patch('app.fd.askdirectory', return_value=str(self.out)):
+            App.batch(app)
+            (work, done), = started
+            done(work())
+            ask.assert_called_once()  # contract.pdf, after the broken file
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ['contract-compressed.pdf', 'report-compressed.pdf'])
+        self.assertEqual(self.status[-1], 'Compressed 2 PDFs. Already optimized files may not shrink. Skipped: broken.pdf.')
 
 
 if __name__ == '__main__':
