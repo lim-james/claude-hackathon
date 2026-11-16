@@ -29,11 +29,14 @@ jobs:
           cache-dependency-path: source-code/OpenSlides/package-lock.json
       - run: npm ci --prefix source-code/OpenSlides
       - run: npm test
+        timeout-minutes: 3
       - run: npm test --prefix source-code/OpenSlides
+        timeout-minutes: 3
       - run: npm run build:web
       - run: npm install --prefix source-code/OpenSlides/.qa --no-package-lock playwright@1.62.1
       - run: npx --prefix source-code/OpenSlides/.qa playwright install --with-deps chromium
       - name: Browser checks
+        timeout-minutes: 3
         shell: bash
         run: |
           npm run dev --prefix source-code/OpenSlides -- --host 127.0.0.1 > /tmp/openslides-vite.log 2>&1 &
@@ -88,6 +91,7 @@ jobs:
       - run: python -m pip install -r source-code/OpenPDF/requirements.txt
       - name: PDF engine tests and benchmarks
         working-directory: source-code/OpenPDF
+        timeout-minutes: 3
         run: |
           python -m unittest discover -s tests -v
           if ($LASTEXITCODE -ne 0) { throw 'PDF tests failed' }
@@ -215,6 +219,7 @@ jobs:
       - run: npm ci --prefix source-code/OpenSlides
       - run: npm run desktop:install --prefix source-code/OpenSlides
       - name: Build and check OpenPDF
+        timeout-minutes: 5
         env:
           OPENPDF_UI_CAPTURE: '1'
         run: |
