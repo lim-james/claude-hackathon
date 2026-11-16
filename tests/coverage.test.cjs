@@ -49,16 +49,32 @@ test('reports from two test runs merge, keeping the run that covered more of a f
  assert.deepEqual([...merged],[['a',[4,9]],['b',[5,9]],['c',[0,3]]]);
 });
 
-test('the floor check compares covered and total lines exactly, so one untested line fails',async()=>{
+test('an area fails when its covered lines fall or its untested lines rise, whatever the percentage',async()=>{
  const {belowFloor}=await load();
- const floors={Same:{covered:146,lines:8654},OneLine:{covered:146,lines:8654},Small:{covered:146,lines:8654},Lost:{covered:146,lines:8654},Tested:{covered:146,lines:8654},Fewer:{covered:146,lines:8654}};
- const areas=[{name:'Same',covered:146,lines:8654},{name:'OneLine',covered:146,lines:8655},{name:'Small',covered:146,lines:8844},
-  {name:'Lost',covered:145,lines:8654},{name:'Tested',covered:150,lines:8700},{name:'Fewer',covered:73,lines:4327}];
- assert.deepEqual(belowFloor(areas,floors),[
-  'OneLine: 146/8655 lines covered is below the floor of 146/8654',
-  'Small: 146/8844 lines covered is below the floor of 146/8654',
-  'Lost: 145/8654 lines covered is below the floor of 146/8654',
- ]);
+ const floor={covered:146,lines:8654};
+ const check=(covered,lines)=>belowFloor([{name:'A',covered,lines}],{A:floor});
+ assert.deepEqual(check(146,8654),[]);
+ assert.deepEqual(check(150,8658),[]);
+ assert.deepEqual(check(146,8600),[]);
+ assert.deepEqual(check(146,8655),['A: 8509 lines are run by no test, above the floor of 8508']);
+ assert.deepEqual(check(145,8653),['A: 145 lines are covered, below the floor of 146']);
+ assert.deepEqual(check(145,8654),['A: 145 lines are covered, below the floor of 146','A: 8509 lines are run by no test, above the floor of 8508']);
+ // A higher percentage than the floor's, with untested lines added: the cases a ratio let through.
+ assert.deepEqual(belowFloor([{name:'A',covered:1067,lines:4665}],{A:{covered:1066,lines:4661}}),['A: 3598 lines are run by no test, above the floor of 3595']);
+ assert.deepEqual(check(147,8713),['A: 8566 lines are run by no test, above the floor of 8508']);
+ assert.deepEqual(check(1460,17308),['A: 15848 lines are run by no test, above the floor of 8508']);
+});
+
+test('a floor whose area was not measured fails, except the OpenPDF floor for the other Tesseract state',async()=>{
+ const {belowFloor}=await load();
+ const one={covered:1,lines:2};
+ const area=name=>({name,covered:1,lines:2});
+ assert.deepEqual(belowFloor([area('A')],{A:one,Gone:one}),['Gone: has a floor but was not measured']);
+ assert.deepEqual(belowFloor([area('OpenPDF')],{OpenPDF:one,Gone:one}),['Gone: has a floor but was not measured']);
+ const floors={OpenPDF:one,'OpenPDF without Tesseract':one,A:one};
+ assert.deepEqual(belowFloor([area('OpenPDF'),area('A')],floors),[]);
+ assert.deepEqual(belowFloor([area('OpenPDF without Tesseract'),area('A')],floors),[]);
+ assert.deepEqual(belowFloor([area('A')],floors),['OpenPDF: has a floor but was not measured','OpenPDF without Tesseract: has a floor but was not measured']);
 });
 
 test('an area without a floor fails instead of passing unchecked',async()=>{
@@ -85,6 +101,58 @@ test('OpenPDF is held to the full floor with Tesseract, its own floor without, a
  assert.equal(pdfAreaName(true,false),'OpenPDF');
  assert.equal(pdfAreaName(false,false),'OpenPDF without Tesseract');
  assert.throws(()=>pdfAreaName(false,true),/Tesseract is not on PATH/);
+});
+
+test('either CI or GITHUB_ACTIONS marks a CI run',async()=>{
+ const {inCi}=await load();
+ assert.equal(inCi({CI:'true'}),true);
+ assert.equal(inCi({CI:'',GITHUB_ACTIONS:'true'}),true);
+ assert.equal(inCi({GITHUB_ACTIONS:'true'}),true);
+ assert.equal(inCi({CI:'',GITHUB_ACTIONS:''}),false);
+ assert.equal(inCi({}),false);
+});
+
+// A PATH holding only an empty file named like Tesseract stands in for an install,
+// and an empty PATH for a machine without it, so these run the same anywhere.
+function pathWith(t,tesseract){
+ const name=process.platform==='win32'?'tesseract.exe':'tesseract';
+ const [file]=fixture(t,tesseract?{[name]:''}:{'empty':''});
+ return path.dirname(file);
+}
+
+test('the OpenPDF floor follows Tesseract on PATH, and CI without it is refused',async t=>{
+ const {pdfArea}=await load();
+ const withIt=pathWith(t,true),without=pathWith(t,false);
+ assert.equal(pdfArea({PATH:withIt,CI:'true'}),'OpenPDF');
+ assert.equal(pdfArea({PATH:withIt}),'OpenPDF');
+ assert.equal(pdfArea({PATH:without}),'OpenPDF without Tesseract');
+ assert.throws(()=>pdfArea({PATH:without,CI:'true'}),/Tesseract is not on PATH/);
+ assert.throws(()=>pdfArea({PATH:without,CI:'',GITHUB_ACTIONS:'true'}),/Tesseract is not on PATH/);
+});
+
+// The real script with its real measure(). PYTHON names a missing command, so a run
+// that gets past the Tesseract check stops at the first test command instead of
+// running the suites: which of the two messages comes back shows where it stopped.
+function realRun(t,tesseract,ci){
+ const env=Object.fromEntries(Object.entries(process.env).filter(([key])=>!/^(path|ci|github_actions)$/i.test(key)));
+ return spawnSync(process.execPath,[scriptFile],{encoding:'utf8',env:{...env,...ci,PATH:pathWith(t,tesseract),PYTHON:path.join(__dirname,'no-such-python')}});
+}
+
+test('run directly in CI without Tesseract, the script exits 1 before it measures anything',t=>{
+ for(const ci of [{CI:'true'},{GITHUB_ACTIONS:'true'},{CI:'',GITHUB_ACTIONS:'true'},{CI:'true',GITHUB_ACTIONS:'true'}]){
+  const result=realRun(t,false,ci);
+  assert.equal(result.status,1,`${JSON.stringify(ci)} exited ${result.status}`);
+  assert.match(result.stderr,/^Tesseract is not on PATH\. CI must run the OCR test/,JSON.stringify(ci));
+  assert.equal(result.stdout,'');
+ }
+});
+
+test('run directly, the script goes on to the tests in CI with Tesseract and outside CI without it',t=>{
+ for(const [tesseract,ci] of [[true,{CI:'true',GITHUB_ACTIONS:'true'}],[true,{}],[false,{}]]){
+  const result=realRun(t,tesseract,ci);
+  assert.equal(result.status,1);
+  assert.match(result.stderr,/^OpenPDF tests failed \(.*ENOENT/,`tesseract ${tesseract}, ${JSON.stringify(ci)}`);
+ }
 });
 
 test('a command counts as installed only when a PATH folder holds it',async t=>{
@@ -120,20 +188,26 @@ const measured=[{name:'A',covered:40,lines:100,percent:40,files:3,loaded:2}];
 test('the script exits 0 when every area is at its floor',t=>{
  const result=gate(t,'{"floors":{"A":{"covered":40,"lines":100}}}',measured);
  assert.equal(result.status,0,result.stderr);
- assert.match(result.stdout,/A +40\.0%  40\/100 lines, 2\/3 files loaded by tests  \(floor 40\/100\)\nCoverage is at or above every floor\./);
+ assert.match(result.stdout,/A +40\.0%  40\/100 lines, 2\/3 files loaded by tests  \(floor 40\/100\)\nEvery area is at or better than its floor\./);
 });
 
-test('the script exits 1 when an area is below its floor',t=>{
+test('the script exits 1 when an area is worse than its floor, and says how to pass',t=>{
  const result=gate(t,'{"floors":{"A":{"covered":41,"lines":100}}}',measured);
  assert.equal(result.status,1);
- assert.match(result.stderr,/Coverage fell below its floor:\n  A: 40\/100 lines covered is below the floor of 41\/100/);
+ assert.match(result.stderr,/Coverage is worse than its floor:\n  A: 40 lines are covered, below the floor of 41\n  A: 60 lines are run by no test, above the floor of 59\nAdd tests .*\n.*coverage\.mjs --update` and commit scripts\/coverage-floor\.json/);
+});
+
+test('the script exits 1 when a floor has no measured area',t=>{
+ const result=gate(t,'{"floors":{"A":{"covered":40,"lines":100},"Dropped":{"covered":7,"lines":111}}}',measured);
+ assert.equal(result.status,1);
+ assert.match(result.stderr,/Dropped: has a floor but was not measured/);
 });
 
 test('the script exits 1 on a floor file with old-style or damaged floors',t=>{
  for(const text of ['{"floors":{"A":50}}','{"tolerance":0.05,"floors":{"A":1.7}}','{"floors":{"A":null}}','{"floors":{"A":"high"}}','{"floors":{}}','{}','null','[]']){
   const result=gate(t,text,measured);
   assert.equal(result.status,1,`${text} exited ${result.status}`);
-  assert.match(result.stderr,/is damaged|Coverage fell below its floor/);
+  assert.match(result.stderr,/is damaged|Coverage is worse than its floor/);
  }
 });
 

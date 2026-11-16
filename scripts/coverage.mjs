@@ -1,12 +1,15 @@
 // Measure line coverage of OpenPDF, OpenSlides and the launcher, and fail when an
-// area falls below its floor in scripts/coverage-floor.json.
+// area is worse than its floor in scripts/coverage-floor.json.
 //
 //   node scripts/coverage.mjs            measure, print one line per area, check the floors
 //   node scripts/coverage.mjs --update   measure and write the numbers as the new floors
 //   --floors <file>                      use this floor file instead
 //
-// A floor is a measurement, {"covered": n, "lines": n}; the check compares the two
-// ratios exactly. OpenPDF has two floors, with and without Tesseract (see pdfAreaName).
+// A floor is a measurement, {"covered": n, "lines": n}. An area fails when it has
+// fewer covered lines than its floor, or more lines that no test runs (lines minus
+// covered). So a change that adds lines no test runs fails until it adds tests or
+// updates the floor file in the same change, where a reviewer sees it.
+// OpenPDF has two floors, with and without Tesseract (see pdfAreaName).
 //
 // A source file that no test loads counts as 0% covered. Node's own report leaves
 // such files out, which would let untested code raise the percentage.
@@ -77,21 +80,39 @@ export function badFloors(floors) {
     .map(([name, floor]) => `${name}: the floor must be {"covered": n, "lines": n} in whole numbers, got ${JSON.stringify(floor)}`);
 }
 
+/** OpenPDF's two floors. One run measures one of them, whichever matches the machine. */
+export const pdfAreas = ['OpenPDF', 'OpenPDF without Tesseract'];
+
 /**
- * The areas that are below their floor, as messages. A floor is the measurement it
- * was set from, `{ "covered": n, "lines": n }`, and the two ratios are compared as
- * whole numbers: no rounding, so one new untested line is enough to fail.
- * Anything else in place of a floor fails, so a damaged file cannot pass.
+ * The areas that are worse than their floor, as messages. A floor is the measurement
+ * it was set from, `{ "covered": n, "lines": n }`, and two counts are checked: covered
+ * lines must not fall, and lines no test runs (lines minus covered) must not rise.
+ * A percentage would let untested lines in whenever covered lines arrive with them.
+ * Anything else in place of a floor fails, so a damaged file cannot pass, and so
+ * does a floor whose area was not measured, so an area cannot be dropped unseen.
  */
 export function belowFloor(areas, floors) {
   const failures = badFloors(floors);
   if (failures.length) return failures;
   for (const area of areas) {
     const floor = floors[area.name];
-    if (floor === undefined) failures.push(`${area.name}: no floor in coverage-floor.json`);
-    else if (BigInt(area.covered) * BigInt(floor.lines) < BigInt(floor.covered) * BigInt(area.lines)) {
-      failures.push(`${area.name}: ${area.covered}/${area.lines} lines covered is below the floor of ${floor.covered}/${floor.lines}`);
+    if (floor === undefined) {
+      failures.push(`${area.name}: no floor in coverage-floor.json`);
+      continue;
     }
+    const untested = area.lines - area.covered;
+    const allowed = floor.lines - floor.covered;
+    if (area.covered < floor.covered) {
+      failures.push(`${area.name}: ${area.covered} lines are covered, below the floor of ${floor.covered}`);
+    }
+    if (untested > allowed) {
+      failures.push(`${area.name}: ${untested} lines are run by no test, above the floor of ${allowed}`);
+    }
+  }
+  const measured = new Set(areas.map((area) => area.name));
+  for (const name of Object.keys(floors)) {
+    const otherPdfState = pdfAreas.includes(name) && pdfAreas.some((other) => measured.has(other));
+    if (!measured.has(name) && !otherPdfState) failures.push(`${name}: has a floor but was not measured`);
   }
   return failures;
 }
@@ -112,6 +133,14 @@ export function pdfAreaName(hasTesseract, inCi) {
   if (hasTesseract) return 'OpenPDF';
   if (inCi) throw new Error('Tesseract is not on PATH. CI must run the OCR test, or the OpenPDF floor would be checked against a run that skipped it.');
   return 'OpenPDF without Tesseract';
+}
+
+/** GitHub Actions sets both variables; either one alone still means CI. */
+export const inCi = (env = process.env) => Boolean(env.CI || env.GITHUB_ACTIONS);
+
+/** The OpenPDF floor this machine is held to. */
+export function pdfArea(env = process.env, platform = process.platform) {
+  return pdfAreaName(onPath('tesseract', env, platform), inCi(env));
 }
 
 /** Several runs' reports as one: a file loaded by more than one keeps its best run. */
@@ -147,7 +176,7 @@ function nodeSuite(label, cwd, pattern, lcovFile) {
 }
 
 function measure() {
-  const pdfName = pdfAreaName(onPath('tesseract'), Boolean(process.env.CI));
+  const pdfName = pdfArea();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opensuite-coverage-'));
   try {
     const pdfDir = path.join(root, 'source-code', 'OpenPDF');
@@ -206,10 +235,12 @@ export function main(argv = process.argv.slice(2), options = {}) {
   }
   const failures = belowFloor(areas, floors);
   if (failures.length) {
-    console.error(`Coverage fell below its floor:\n  ${failures.join('\n  ')}\nAdd tests for the code this change adds.`);
+    console.error(`Coverage is worse than its floor:\n  ${failures.join('\n  ')}\n`
+      + 'Add tests for the lines this change adds or stops covering. If the change is meant to leave them\n'
+      + 'untested, run `node scripts/coverage.mjs --update` and commit scripts/coverage-floor.json with it.');
     return 1;
   }
-  console.log('Coverage is at or above every floor.');
+  console.log('Every area is at or better than its floor.');
   return 0;
 }
 
