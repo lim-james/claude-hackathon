@@ -332,9 +332,13 @@ class PDF:
             ticked = answer in ('yes', 'true', '1', 'on') or (own_on_state and answer == str(on).lower())
             return on if ticked else 'Off'
         if widget.field_type in (fitz.PDF_WIDGET_TYPE_COMBOBOX, fitz.PDF_WIDGET_TYPE_LISTBOX):
-            options = widget.choice_values or []
-            if value and options and value not in options:
-                raise ValueError(f'{value!r} is not one of: {", ".join(options)}')
+            # An option is a name or, in forms from other tools, an (export, display) pair.
+            options = [(o, o) if isinstance(o, str) else tuple(o) for o in (widget.choice_values or [])]
+            # An editable dropdown also holds text typed outside its options.
+            typed = (widget.field_type == fitz.PDF_WIDGET_TYPE_COMBOBOX
+                     and (widget.field_flags or 0) & fitz.PDF_CH_FIELD_IS_EDIT)
+            if value and options and not typed and not any(value in option for option in options):
+                raise ValueError(f'{value!r} is not one of: {", ".join(str(o[-1]) for o in options)}')
         return value
 
     def fill_field(self, index, name, value):

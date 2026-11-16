@@ -167,6 +167,47 @@ class FormFieldTests(unittest.TestCase):
         self.assertEqual(refused, [])
         self.assertEqual(self.values(self.pdf), filled)
 
+    def add_dropdown(self, pdf, choices, value, flags=0):
+        # A dropdown as another tool writes it, which add_field cannot make.
+        widget = fitz.Widget()
+        widget.field_name, widget.field_type = 'town', fitz.PDF_WIDGET_TYPE_COMBOBOX
+        widget.rect = fitz.Rect(50, 50, 250, 80)
+        widget.choice_values, widget.field_flags, widget.field_value = choices, flags, value
+        pdf.doc[0].add_widget(widget)
+        pdf.restore(pdf.bytes())
+
+    def town_xfdf(self, value):
+        return f'<xfdf><fields><field name="town"><value>{value}</value></field></fields></xfdf>'
+
+    def test_import_accepts_either_name_of_an_export_display_option(self):
+        self.add_dropdown(self.pdf, [('sg', 'Singapore'), ('my', 'Malaysia')], 'Singapore')
+        for value in ('Malaysia', 'my'):
+            with self.subTest(value=value):
+                refused = []
+                self.assertEqual(self.import_text(self.pdf, self.town_xfdf(value), refused), 1)
+                self.assertEqual((self.values(self.pdf), refused), ({'town': value}, []))
+        refused = []
+        self.assertEqual(self.import_text(self.pdf, self.town_xfdf('Brunei'), refused), 0)
+        self.assertEqual(refused, [('town', "'Brunei' is not one of: Singapore, Malaysia")])
+        self.assertEqual(self.values(self.pdf), {'town': 'my'})
+        self.pdf.fill_field(0, 'town', 'Singapore')  # Fill fields follows the same rule
+        with tempfile.TemporaryDirectory() as folder:  # and OpenPDF's own export comes back
+            data = Path(folder) / 'answers.xfdf'
+            self.pdf.export_form_data(data)
+            self.pdf.fill_field(0, 'town', 'Malaysia')
+            self.assertEqual(self.pdf.import_form_data(data), 1)
+        self.assertEqual(self.values(self.pdf), {'town': 'Singapore'})
+
+    def test_import_keeps_a_typed_value_in_an_editable_dropdown(self):
+        self.add_dropdown(self.pdf, ['A', 'B'], 'Custom town', fitz.PDF_CH_FIELD_IS_EDIT)
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder) / 'answers.xfdf'
+            self.pdf.export_form_data(data)
+            self.pdf.fill_field(0, 'town', 'B')
+            refused = []
+            self.assertEqual(self.pdf.import_form_data(data, refused), 1)
+        self.assertEqual((self.values(self.pdf), refused), ({'town': 'Custom town'}, []))
+
 
 if __name__ == '__main__':
     unittest.main()
