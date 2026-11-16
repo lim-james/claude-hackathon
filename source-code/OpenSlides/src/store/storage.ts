@@ -18,6 +18,7 @@ export async function loadDeck(id: string): Promise<Deck | undefined> {
 }
 
 export async function deleteDeck(id: string): Promise<void> {
+  await scheduler.forget(id); // an unsaved or failed edit must not store the deck again
   await del(deckKey(id));
   for (const v of await listVersions(id)) await deleteVersion(id, v.id);
 }

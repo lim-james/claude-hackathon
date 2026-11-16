@@ -21,8 +21,10 @@ export interface SaveSchedulerOptions<D extends { id: string }> {
 export interface SaveScheduler<D> {
   /** The deck was edited: write this object soon. */
   change(deck: D): void;
-  /** Another deck was opened unchanged: nothing to write for it, but finish what is pending. */
+  /** A deck was loaded from storage and opened unchanged: storage holds it, so an older unsaved copy of it is dropped. Finishes what is pending for other decks. */
   open(deck: D): void;
+  /** The deck is being deleted: nothing of it is written from now on. Resolves once no write of it is under way. */
+  forget(id: string): Promise<void>;
   /** Writes everything pending now. Rejects if a write fails; the deck stays pending. */
   flush(): Promise<void>;
 }
@@ -39,6 +41,10 @@ export function createSaveScheduler<D extends { id: string }>(opts: SaveSchedule
   // Decks whose last write failed and that were not edited since. They stay pending and are
   // retried with the next write, but they neither set a timer nor hold up another deck.
   const failed = new Set<string>();
+  // Ids opened or deleted while a write is under way: that write must not bring them back.
+  const dropped = new Set<string>();
+  // The object storage is known to hold, so putting it back (undo) is not written twice.
+  // Only trusted while no write is under way: see change().
   let saved: D | null = null;
   let timer: unknown = null;
   let running: Promise<void> | null = null;
@@ -90,8 +96,9 @@ export function createSaveScheduler<D extends { id: string }>(opts: SaveSchedule
         try {
           await attempt(deck);
           failed.delete(id);
-          saved = deck;
+          if (!dropped.has(id)) saved = deck;
         } catch (cause) {
+          if (dropped.has(id)) continue; // deleted or reloaded meanwhile: nothing left to save
           failedNow.add(id);
           error ??= { cause };
           // Still unsaved: the next change or flush retries. A newer edit is retried on the timer.
@@ -104,6 +111,7 @@ export function createSaveScheduler<D extends { id: string }>(opts: SaveSchedule
     } finally {
       running = null;
       drain = false;
+      dropped.clear();
     }
     if (error) opts.onStatus('error');
     else if (!pending.size) opts.onStatus('saved');
@@ -117,9 +125,20 @@ export function createSaveScheduler<D extends { id: string }>(opts: SaveSchedule
     return running ?? Promise.resolve();
   };
 
+  // Stops tracking a deck id: storage, not this scheduler, now says what the deck is.
+  const drop = (id: string) => {
+    pending.delete(id);
+    failed.delete(id);
+    if (saved?.id === id) saved = null;
+    if (running) dropped.add(id);
+    else if (!pending.size) opts.onStatus('saved');
+  };
+
   return {
     change(deck) {
-      if (deck === saved && !pending.size) return;
+      // During a write `saved` is one write behind: an undo or redo that puts the saved
+      // object back while a newer one is being written must be written again.
+      if (deck === saved && !pending.size && !running) return;
       const other = [...pending.keys()].some((id) => id !== deck.id && !failed.has(id));
       pending.set(deck.id, deck);
       failed.delete(deck.id);
@@ -131,11 +150,16 @@ export function createSaveScheduler<D extends { id: string }>(opts: SaveSchedule
       } else schedule();
     },
     open(deck) {
-      if (!pending.has(deck.id)) saved = deck;
+      drop(deck.id);
+      saved = deck;
       if (pending.size) {
         drain = true;
         void start().catch(() => {});
       }
+    },
+    async forget(id) {
+      drop(id);
+      while (running) await running.catch(() => {});
     },
     async flush() {
       if (!pending.size && !running) return;
