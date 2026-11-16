@@ -1,5 +1,6 @@
 import type { Deck } from '../model/types';
 import { uid } from '../model/factory';
+import { deckProblem } from '../model/validate';
 
 export const DECK_FILE_EXT = '.openslides.json';
 
@@ -34,6 +35,8 @@ export async function readDeckFile(file: File): Promise<Deck> {
   if (!data || !Array.isArray(data.slides) || !Array.isArray(data.layouts) || !data.theme || !data.size) {
     throw new Error(`${file.name} is missing slides or a theme, so it can't be opened.`);
   }
+  const problem = deckProblem(data);
+  if (problem) throw new Error(`${file.name} is damaged (${problem}), so it can't be opened.`);
   const now = Date.now();
   const deck: Deck = {
     id: uid(),

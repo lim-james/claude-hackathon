@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { currentSlide, openDeck, redo, setToast, undo, useEditor } from '../store/editor';
 import { flushSave, loadDeck } from '../store/storage';
+import { deckProblem } from '../model/validate';
 import {
   clearSelection,
   copySelection,
@@ -220,12 +221,14 @@ export function EditorPage({ id }: { id: string }) {
   const studioTab = useEditor((s) => s.studioTab);
   const inspectorOpen = useEditor((s) => s.inspectorOpen);
   const [missing, setMissing] = useState(false);
+  const [damaged, setDamaged] = useState(false);
   useEffect(() => {
     let alive = true;
     loadDeck(id)
       .then((d) => {
         if (!alive) return;
-        if (d) {
+        if (d && deckProblem(d, { stored: true })) setDamaged(true);
+        else if (d) {
           openDeck(d);
           const notice = sessionStorage.getItem('deckforge-notice');
           if (notice) {
@@ -246,10 +249,14 @@ export function EditorPage({ id }: { id: string }) {
   useShortcuts();
   useClipboard();
 
-  if (missing) {
+  if (missing || damaged) {
     return (
       <div className="center-msg">
-        <p>This deck isn’t saved in this browser. Decks live on the device where they were made.</p>
+        <p>
+          {damaged
+            ? 'This deck is damaged and can’t be opened. You can download or delete it from your decks.'
+            : 'This deck isn’t saved in this browser. Decks live on the device where they were made.'}
+        </p>
         <button className="btn primary" onClick={() => navigate('#/')}>
           Go to your decks
         </button>

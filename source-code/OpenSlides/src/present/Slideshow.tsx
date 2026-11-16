@@ -80,7 +80,7 @@ export function SlideshowPage({ id, start, audience = false }: { id: string; sta
   if (deck === null) {
     return (
       <div className="show dark center-msg">
-        <p>This deck isn’t saved in this browser.</p>
+        <p>This deck isn’t saved in this browser, or it is damaged.</p>
       </div>
     );
   }

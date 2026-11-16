@@ -4,6 +4,8 @@ import { EditorPage } from './editor/Editor';
 import { SlideshowPage } from './present/Slideshow';
 import { PresenterPage } from './present/Presenter';
 import { startAutosave } from './store/storage';
+import { ErrorBoundary } from './ErrorBoundary';
+import { navigate } from './router';
 
 export type Route =
   | { name: 'home' }
@@ -34,6 +36,31 @@ export function App() {
   }, []);
   useEffect(() => startAutosave(), []);
 
+  // Keyed by page, so leaving a page that failed to draw clears the failure.
+  return (
+    <ErrorBoundary
+      key={`${route.name}:${'id' in route ? route.id : ''}`}
+      fallback={(reset) => (
+        <div className="center-msg" role="alert">
+          <p>Something went wrong showing this page. Your decks are still saved in this browser.</p>
+          <button
+            className="btn primary"
+            onClick={() => {
+              reset();
+              navigate('#/');
+            }}
+          >
+            Go to your decks
+          </button>
+        </div>
+      )}
+    >
+      {page(route)}
+    </ErrorBoundary>
+  );
+}
+
+function page(route: Route) {
   switch (route.name) {
     case 'editor':
       return <EditorPage key={route.id} id={route.id} />;

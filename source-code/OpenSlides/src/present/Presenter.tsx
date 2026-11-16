@@ -89,7 +89,7 @@ export function PresenterPage({ id, start }: { id: string; start: number }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (deck === null) return <div className="center-msg">This deck isn’t saved in this browser.</div>;
+  if (deck === null) return <div className="center-msg">This deck isn’t saved in this browser, or it is damaged.</div>;
   if (!deck) return <div className="center-msg muted">Opening…</div>;
 
   const slide = slides[state.i];

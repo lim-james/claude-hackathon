@@ -299,6 +299,19 @@ kbd {
   background: none;
 }
 
+.deck-damaged {
+  aspect-ratio: 16 / 9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  border-radius: var(--radius-m);
+  box-shadow: 0 0 0 1px var(--line);
+}
+
 .deck-meta {
   display: flex;
   justify-content: space-between;

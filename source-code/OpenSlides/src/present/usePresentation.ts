@@ -3,6 +3,7 @@ import type { Deck, Slide } from '../model/types';
 import { getLayout, resolveElement } from '../model/resolve';
 import { buildPlan } from '../render/builds';
 import { loadDeck } from '../store/storage';
+import { deckProblem } from '../model/validate';
 import { useEditor } from '../store/editor';
 
 export interface ShowState {
@@ -29,7 +30,7 @@ export function useDeck(id: string) {
   });
   useEffect(() => {
     if (deck) return;
-    loadDeck(id).then((d) => setDeck(d ?? null));
+    loadDeck(id).then((d) => setDeck(d && !deckProblem(d, { stored: true }) ? d : null));
   }, [id, deck]);
   return deck;
 }
