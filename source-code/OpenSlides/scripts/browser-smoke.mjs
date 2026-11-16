@@ -17,6 +17,20 @@ try{
  assert.equal(await page.locator('.studio-fonts button').count(),3);
  await rail.getByRole('button',{name:'Themes',exact:true}).click();
  assert.equal(await page.locator('.studio-theme').count(),20);
+ // Save current theme asks for the name in the panel: a browser dialog would not exist in the desktop build.
+ let dialogs=0;page.on('dialog',d=>{dialogs++;void d.dismiss();});
+ const saveTheme=page.getByRole('button',{name:'Save current theme',exact:true}),themeName=page.getByLabel('Theme name'),focused=l=>l.evaluate(e=>e===document.activeElement);
+ await saveTheme.click();await themeName.waitFor({timeout:3000});
+ assert.equal(dialogs,0);assert.ok(await focused(themeName));
+ const form=await page.locator('.studio-content form').boundingBox(),panel=await page.locator('.studio-content').boundingBox();assert.ok(form.x>=panel.x&&form.x+form.width<=panel.x+panel.width,'Theme name form overflows the panel');
+ assert.equal(await themeName.inputValue(),await page.evaluate(async()=>(await import('/src/store/editor.ts')).useEditor.getState().deck.theme.name));
+ await page.keyboard.press('Escape');assert.equal(await themeName.count(),0);assert.ok(await focused(saveTheme));
+ await saveTheme.click();await themeName.fill('   ');await page.keyboard.press('Enter');
+ assert.equal(await page.locator('.studio-theme').count(),20);assert.equal(await page.locator('.toast').count(),0);
+ await saveTheme.click();await themeName.fill('Smoke theme '+'x'.repeat(90));await page.keyboard.press('Enter');
+ assert.equal(await page.locator('.studio-theme').count(),21);await page.getByText('Theme saved on this device.',{exact:true}).waitFor();assert.ok(await focused(saveTheme));
+ assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('df-saved-themes')).map(t=>t.name.length)),[80]);
+ await page.getByRole('button',{name:/^Delete theme Smoke theme/}).click();assert.equal(await page.locator('.studio-theme').count(),20);
  await page.locator('.studio-theme').nth(9).click();
  await page.getByRole('button',{name:'Apply to deck',exact:true}).click();
  await rail.getByRole('button',{name:'Agents',exact:true}).click();
