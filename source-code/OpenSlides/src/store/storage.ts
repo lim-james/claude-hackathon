@@ -2,6 +2,7 @@ import { del, get, keys, set } from 'idb-keyval';
 import type { Deck } from '../model/types';
 import { uid } from '../model/factory';
 import { useEditor } from './editor';
+import { createSaveScheduler } from './saveScheduler';
 
 // Decks are stored in the browser's IndexedDB, so the app works fully offline
 // and nothing leaves the device unless the user exports a file.
@@ -77,41 +78,34 @@ function setStatus(s: SaveStatus) {
   listeners.forEach((l) => l(s));
 }
 
-let timer: ReturnType<typeof setTimeout> | null = null;
-let lastSaved: Deck | null = null;
+const scheduler = createSaveScheduler<Deck>({
+  write: (deck) => saveDeck({ ...deck, updatedAt: Date.now() }),
+  onStatus: setStatus,
+});
 
-/** Autosaves the open deck shortly after every change. */
+/** Autosaves the open deck while it is edited, and when the page is hidden or closed. */
 export function startAutosave() {
-  return useEditor.subscribe((state, prev) => {
+  const unsubscribe = useEditor.subscribe((state, prev) => {
     const deck = state.deck;
-    if (!deck || deck === prev.deck || deck === lastSaved) return;
-    if (prev.deck && prev.deck.id !== deck.id) {
-      lastSaved = deck;
-      return;
-    }
-    setStatus('saving');
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(async () => {
-      const latest = useEditor.getState().deck;
-      if (!latest) return;
-      try {
-        const stamped = { ...latest, updatedAt: Date.now() };
-        await saveDeck(stamped);
-        lastSaved = latest;
-        setStatus('saved');
-      } catch {
-        setStatus('error');
-      }
-    }, 500);
+    if (!deck || deck === prev.deck) return;
+    if (prev.deck && prev.deck.id !== deck.id) scheduler.open(deck);
+    else scheduler.change(deck);
   });
+  // A hidden tab can be discarded and a closing one is gone: write pending edits now.
+  const leaving = () => void flushSave().catch(() => {});
+  const hidden = () => {
+    if (document.visibilityState === 'hidden') leaving();
+  };
+  document.addEventListener('visibilitychange', hidden);
+  window.addEventListener('pagehide', leaving);
+  return () => {
+    unsubscribe();
+    document.removeEventListener('visibilitychange', hidden);
+    window.removeEventListener('pagehide', leaving);
+  };
 }
 
-export async function flushSave() {
-  const deck = useEditor.getState().deck;
-  if (timer) clearTimeout(timer);
-  if (deck) {
-    await saveDeck({ ...deck, updatedAt: Date.now() });
-    lastSaved = deck;
-    setStatus('saved');
-  }
+/** Writes any unsaved edits now. */
+export function flushSave(): Promise<void> {
+  return scheduler.flush();
 }
