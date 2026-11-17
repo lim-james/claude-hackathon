@@ -389,9 +389,15 @@ class PDF:
         from watermark_tools import add_watermarks
         add_watermarks(self.doc, text, **options)
 
+    @staticmethod
+    def _stamp_text(page, point, text, **options):
+        # point is in displayed (rotated) page coordinates; insert_text works in unrotated space.
+        page.insert_text(fitz.Point(point) * page.derotation_matrix, text,
+                         rotate=page.rotation, **options)
+
     def number_pages(self):
         for i, page in enumerate(self.doc):
-            page.insert_text((page.rect.width / 2, page.rect.height - 20),
+            self._stamp_text(page, (page.rect.width / 2, page.rect.height - 20),
                              f'{i + 1} / {len(self.doc)}', fontsize=10)
 
     # Header/footer slots; templates may contain <page> <pages> <date> <filename>.
@@ -413,7 +419,7 @@ class PDF:
         else:
             x = (page.rect.width - width) / 2
         y = margin if band in ('header', 'top') else page.rect.height - margin
-        page.insert_text((x, y), text, fontsize=size, fontname=font, color=color)
+        self._stamp_text(page, (x, y), text, fontsize=size, fontname=font, color=color)
 
     def apply_header_footer(self, slots, filename='', size=10, color=(0, 0, 0),
                             font='helv', margin=36, first=None, last=None):
