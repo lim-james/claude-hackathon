@@ -366,5 +366,163 @@ class DeletePageBookmarkTests(unittest.TestCase):
             self.assertIn('Chapter 3', doc[0].get_text())
 
 
+class PageRemovalKeepsDocumentPartsTests(unittest.TestCase):
+    """Delete page, Extract and reorder keep every part of the file that master keeps.
+
+    Master's Delete page (``doc.delete_page``) keeps all of these. Master's
+    Extract / reorder (``doc.select``) keeps only those in KEPT_BY_SELECT and
+    drops the rest of the catalog; that is left as it was.
+    """
+
+    KEPT_BY_SELECT = ('field values', 'named destinations', 'structure tree',
+                      'optional content', 'links', 'file attachment', 'document info')
+    OPERATIONS = {
+        'delete page 2': lambda pdf: pdf.delete_page(1),
+        'extract 3,1,4': lambda pdf: pdf.select('3,1,4'),
+        'reorder 4-1': lambda pdf: pdf.select('4-1'),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        cls.path = cls.root / 'parts.pdf'
+        doc = fitz.open()
+        for number in range(1, 5):
+            doc.new_page().insert_text((72, 72), f'Chapter {number}', fontsize=20)
+        page = [doc.page_xref(i) for i in range(4)]
+        for index, (name, value) in enumerate([('name', 'Ann'), ('city', 'Oslo'), ('zip', '0150')]):
+            widget = fitz.Widget()
+            widget.field_name, widget.field_type, widget.field_value = name, fitz.PDF_WIDGET_TYPE_TEXT, value
+            widget.rect = fitz.Rect(72, 100, 272, 130)
+            doc[index].add_widget(widget)
+        layer = doc.add_ocg('Layer A')
+        doc[2].insert_text((72, 300), 'In layer', oc=layer)
+        doc.embfile_add('notes.txt', b'hello')
+        doc[2].add_file_annot(fitz.Point(300, 300), b'attached', 'page3.txt')
+        catalog = doc.pdf_catalog()
+        doc.xref_set_key(catalog, 'Names/Dests', f'<</Names[(d1)[{page[0]} 0 R/Fit](d3)[{page[2]} 0 R/Fit]]>>')
+        doc.xref_set_key(catalog, 'Dests', f'<</old3[{page[2]} 0 R/Fit]>>')
+        doc.xref_set_key(catalog, 'Names/JavaScript', '<</Names[(init)<</S/JavaScript/JS(app.alert\\(1\\))>>]>>')
+        doc.xref_set_key(catalog, 'OpenAction', '<</S/JavaScript/JS(app.alert\\(2\\))>>')
+        doc.set_page_labels([{'startpage': 0, 'prefix': 'A-', 'style': 'D', 'firstpagenum': 1}])
+        root = doc.get_new_xref()
+        elements = []
+        for xref in page:
+            element = doc.get_new_xref()
+            doc.update_object(element, f'<</Type/StructElem/S/P/P {root} 0 R/Pg {xref} 0 R/K 0>>')
+            elements.append(f'{element} 0 R')
+        doc.update_object(root, f'<</Type/StructTreeRoot/K[{" ".join(elements)}]>>')
+        doc.xref_set_key(catalog, 'StructTreeRoot', f'{root} 0 R')
+        doc.xref_set_key(catalog, 'MarkInfo', '<</Marked true>>')
+        doc.xref_set_key(catalog, 'Lang', '(en-GB)')
+        doc.xref_set_key(catalog, 'ViewerPreferences', '<</DisplayDocTitle true>>')
+        doc.xref_set_key(catalog, 'PageLayout', '/TwoColumnLeft')
+        doc.set_metadata({'title': 'Parts'})
+        doc.set_xml_metadata('<x:xmpmeta xmlns:x="adobe:ns:meta/"/>')
+        first = doc[0]
+        first.insert_link({'kind': fitz.LINK_GOTO, 'from': fitz.Rect(72, 200, 172, 220), 'page': 2, 'to': fitz.Point(0, 0)})
+        first.insert_link({'kind': fitz.LINK_NAMED, 'from': fitz.Rect(72, 230, 172, 250), 'nameddest': 'd3'})
+        first.insert_link({'kind': fitz.LINK_URI, 'from': fitz.Rect(72, 260, 172, 280), 'uri': 'https://example.com'})
+        doc.set_toc([[1, 'Intro', 1], [1, 'Method', 2], [1, 'Results', 3]])
+        doc.save(cls.path)
+        doc.close()
+        cls.saved = {}
+        for label, operation in cls.OPERATIONS.items():
+            pdf = PDF(str(cls.path))
+            operation(pdf)
+            out = cls.root / f'{label}.pdf'
+            pdf.save(out)
+            pdf.close()
+            cls.saved[label] = out
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def check(self, item, test):
+        """Run test(doc, page index of 'Chapter n') on each saved result that should keep item."""
+        for label, path in self.saved.items():
+            if label.startswith('delete') or item in self.KEPT_BY_SELECT:
+                with self.subTest(label), fitz.open(path) as doc:
+                    where = {doc[i].get_text().split('\n')[0]: i for i in range(len(doc))}
+                    test(doc, where)
+
+    @staticmethod
+    def catalog(doc, key):
+        return doc.xref_get_key(doc.pdf_catalog(), key)[1]
+
+    def test_form_definition(self):
+        def test(doc, where):
+            self.assertTrue(doc.is_form_pdf)
+            self.assertNotEqual(self.catalog(doc, 'AcroForm/Fields'), 'null')
+        self.check('form definition', test)
+
+    def test_field_values(self):
+        def test(doc, where):
+            values = {w.field_name: w.field_value for p in doc for w in p.widgets()}
+            self.assertEqual(values['name'], 'Ann')
+            self.assertEqual(values['zip'], '0150')
+        self.check('field values', test)
+
+    def test_named_destinations(self):
+        def test(doc, where):
+            self.assertEqual(doc.resolve_names()['d3']['page'], where['Chapter 3'])
+        self.check('named destinations', test)
+
+    def test_old_style_named_destinations(self):
+        self.check('/Dests', lambda doc, where: self.assertIn('/old3', self.catalog(doc, 'Dests')))
+
+    def test_structure_tree(self):
+        def test(doc, where):
+            self.assertNotEqual(self.catalog(doc, 'StructTreeRoot'), 'null')
+            self.assertIn('0 R', self.catalog(doc, 'StructTreeRoot/K'))
+        self.check('structure tree', test)
+
+    def test_mark_info(self):
+        self.check('/MarkInfo', lambda doc, where: self.assertIn('/Marked true', self.catalog(doc, 'MarkInfo')))
+
+    def test_page_labels(self):
+        self.check('page labels', lambda doc, where: self.assertEqual(doc[where['Chapter 1']].get_label(), 'A-1'))
+
+    def test_attachments(self):
+        self.check('attachments', lambda doc, where: self.assertEqual(doc.embfile_names(), ['notes.txt']))
+
+    def test_file_attachment_annotation(self):
+        def test(doc, where):
+            annots = doc[where['Chapter 3']].annots(types=[fitz.PDF_ANNOT_FILE_ATTACHMENT])
+            self.assertEqual([a.file_info['filename'] for a in annots], ['page3.txt'])
+        self.check('file attachment', test)
+
+    def test_optional_content(self):
+        self.check('optional content',
+                   lambda doc, where: self.assertEqual([v['name'] for v in doc.get_ocgs().values()], ['Layer A']))
+
+    def test_javascript(self):
+        def test(doc, where):
+            self.assertIn('app.alert', self.catalog(doc, 'Names/JavaScript/Names'))
+            self.assertIn('/JavaScript', self.catalog(doc, 'OpenAction'))
+        self.check('javascript', test)
+
+    def test_links_to_other_pages(self):
+        def test(doc, where):
+            links = doc[where['Chapter 1']].get_links()
+            self.assertEqual(sorted(l.get('page', -1) for l in links if l['kind'] in (fitz.LINK_GOTO, fitz.LINK_NAMED)),
+                             [where['Chapter 3']] * 2)
+            self.assertIn('https://example.com', [l.get('uri') for l in links])
+        self.check('links', test)
+
+    def test_document_settings(self):
+        def test(doc, where):
+            self.assertEqual(self.catalog(doc, 'Lang'), 'en-GB')
+            self.assertIn('DisplayDocTitle', self.catalog(doc, 'ViewerPreferences'))
+            self.assertEqual(self.catalog(doc, 'PageLayout'), '/TwoColumnLeft')
+        self.check('document settings', test)
+
+    def test_metadata(self):
+        self.check('XMP metadata', lambda doc, where: self.assertIn('xmpmeta', doc.get_xml_metadata()))
+        self.check('document info', lambda doc, where: self.assertEqual(doc.metadata['title'], 'Parts'))
+
+
 if __name__ == '__main__':
     unittest.main()

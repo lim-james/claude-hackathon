@@ -339,27 +339,30 @@ class PDF:
                 source.close()
 
     def select(self, spec):
-        self.keep_pages(page_numbers(spec, len(self.doc)))
+        pages = page_numbers(spec, len(self.doc))
+        self._drop_bookmarks_to(set(range(len(self.doc))) - set(pages))
+        self.doc.select(pages)
 
     def delete_page(self, index):
-        self.keep_pages([i for i in range(len(self.doc)) if i != index])
+        # doc.delete_page, not doc.select: select also drops the catalog's
+        # /AcroForm, /Names /EmbeddedFiles and /JavaScript, /Dests, /PageLabels,
+        # /OpenAction, /MarkInfo, /Lang, /ViewerPreferences and XMP metadata.
+        self._drop_bookmarks_to({index})
+        self.doc.delete_page(index)
 
-    def keep_pages(self, pages):
-        """Keep these 0-based pages in this order, and the bookmarks that still open one.
+    def _drop_bookmarks_to(self, indexes):
+        """Take out each bookmark that opens one of these 0-based pages.
 
-        A bookmark to a removed page is taken out and its children take its
-        place, so none is left opening nothing and none to a kept page is lost.
-        ``doc.delete_page`` keeps them all; ``doc.select`` keeps a parent with
-        surviving children, opening nothing, and loses grandchildren.
+        Its children take its place, so none is left opening nothing and none
+        to a kept page is lost. ``doc.delete_page`` keeps them all, opening
+        nothing; ``doc.select`` keeps a parent with surviving children, opening
+        nothing, and loses grandchildren.
         """
-        kept = set(pages)
-        removed = {self.doc.page_xref(i) for i in range(len(self.doc)) if i not in kept}
-        dead = _bookmarks_to(self.doc, removed)
+        dead = _bookmarks_to(self.doc, {self.doc.page_xref(i) for i in indexes})
         for xref in dead:
             _unlink_bookmark(self.doc, xref)
         if dead:
             _recount(self.doc, _ref(self.doc, self.doc.pdf_catalog(), 'Outlines'))
-        self.doc.select(pages)
 
     def split(self, folder):
         for index in range(len(self.doc)):
