@@ -64,7 +64,7 @@ try{
   const {htmlToText}=await import('/src/model/resolve.ts');window.__injected=false;htmlToText('<img src="bad" onerror="window.__injected=true"><p>Safe</p>');await new Promise(r=>setTimeout(r,100));
   return {bytes:data.byteLength,media:Object.keys(zip.files).filter(f=>f.startsWith('ppt/media/')).length,slides:Object.keys(zip.files).filter(f=>/^ppt\/slides\/slide[0-9]+\.xml$/.test(f)).length,injected:window.__injected};
  });assert.ok(exports.bytes>5000);assert.ok(exports.media>=2);assert.equal(exports.slides,1);assert.equal(exports.injected,false);
- // PNG and PDF exports embed the fonts of every exported slide, not only the first one's.
+ // PNG and PDF exports embed, in each slide, the fonts that slide uses, not only the first slide's.
  const exportFonts=await page.evaluate(async()=>{
   const {renderSlides}=await import('/src/io/export.tsx');const {createFromTemplate}=await import('/src/model/templates.ts');const {resolveElement,getLayout}=await import('/src/model/resolve.ts');
   const embeds=(css,family)=>css.split('@font-face').some(rule=>new RegExp(`font-family:\\s*["']?${family}["']?\\s*;`).test(rule)&&rule.includes('url("data:'));
@@ -77,7 +77,19 @@ try{
   }
   return result;
  });
- for(const [family,r] of Object.entries(exportFonts)){assert.equal(r.onFirstSlide,false,`${family} is not a font of slide 1`);assert.deepEqual(r.embedded,[true,true],`${family}, used on slide 2 only, is embedded in the export`);}
+ for(const [family,r] of Object.entries(exportFonts)){assert.equal(r.onFirstSlide,false,`${family} is not a font of slide 1`);assert.deepEqual(r.embedded,[false,true],`${family}, used on slide 2 only, is embedded in slide 2 of the export`);}
+ // An export reports each slide as it is done; a cancelled one downloads nothing and leaves no slide mounted.
+ const exportJob=await page.evaluate(async()=>{
+  const {renderSlides,withExportJob,exportAllPngs}=await import('/src/io/export.tsx');const {createFromTemplate}=await import('/src/model/templates.ts');
+  const deck=createFromTemplate('marketing'),seen=[];
+  const done=await withExportJob({onProgress:(n,total)=>seen.push(`${n}/${total}`)},()=>renderSlides(deck,[0,1,2],async node=>node.dataset.export));
+  const create=URL.createObjectURL;let downloads=0,error='';URL.createObjectURL=blob=>{downloads++;return create.call(URL,blob);};
+  const abort=new AbortController(),steps=[];
+  try{await withExportJob({signal:abort.signal,onProgress:n=>{steps.push(n);if(n===2)abort.abort();}},()=>exportAllPngs(deck));}catch(e){error=e.name;}finally{URL.createObjectURL=create;}
+  return {seen,done,steps,error,downloads,left:document.querySelectorAll('[data-export]').length};
+ });
+ assert.deepEqual(exportJob.seen,['1/3','2/3','3/3']);assert.deepEqual(exportJob.done,['0','1','2']);
+ assert.deepEqual(exportJob.steps,[1,2],'no slide is rendered after Cancel');assert.equal(exportJob.error,'AbortError');assert.equal(exportJob.downloads,0);assert.equal(exportJob.left,0);
  await page.evaluate(async()=>{const {mutate,useEditor}=await import('/src/store/editor.ts');const {createFromTemplate}=await import('/src/model/templates.ts');const d=createFromTemplate('creative');mutate(deck=>{deck.title=d.title;deck.theme=d.theme;deck.layouts=d.layouts;deck.slides=d.slides;});useEditor.setState({slideId:d.slides[0].id,selection:[]});});
  await page.screenshot({path:'studio-smoke.png',fullPage:true});
  const history=await page.evaluate(async()=>{

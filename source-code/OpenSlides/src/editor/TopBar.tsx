@@ -110,6 +110,8 @@ export function TopBar() {
   const [title, setTitle] = useState(deck.title);
   const imgRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const exportAbort = useRef<AbortController | null>(null);
   useEffect(() => setTitle(deck.title), [deck.title]);
   const issues = useIssues();
   const errors = issues.filter((i) => i.severity === 'error').length;
@@ -121,15 +123,21 @@ export function TopBar() {
   };
 
   const runExport = async (kind: 'pptx' | 'pdf' | 'png' | 'pngs') => {
+    const abort = new AbortController();
+    exportAbort.current = abort;
+    setProgress(null);
     setBusy(kind);
     try {
       const mod = await import('../io/export');
-      if (kind === 'pptx') await mod.exportPptx(deck);
-      if (kind === 'pdf') await mod.exportPdf(deck);
-      if (kind === 'png') await mod.exportPng(deck, slideIndex());
-      if (kind === 'pngs') await mod.exportAllPngs(deck);
+      await mod.withExportJob({ signal: abort.signal, onProgress: (done, total) => setProgress({ done, total }) }, async () => {
+        if (kind === 'pptx') await mod.exportPptx(deck);
+        if (kind === 'pdf') await mod.exportPdf(deck);
+        if (kind === 'png') await mod.exportPng(deck, slideIndex());
+        if (kind === 'pngs') await mod.exportAllPngs(deck);
+      });
       setToast(kind === 'pptx' ? 'PowerPoint file downloaded' : kind === 'pdf' ? 'PDF downloaded' : 'Images downloaded');
     } catch (e) {
+      if (abort.signal.aborted && (e as Error).name === 'AbortError') return;
       console.error(e);
       setToast(`Export failed: ${(e as Error).message}`);
     } finally {
@@ -279,7 +287,7 @@ export function TopBar() {
         align="right"
         trigger={(_, t) => (
           <button className="btn" onClick={t} disabled={!!busy}>
-            <Download size={16} /> {busy ? 'Exporting…' : 'Export'} <ChevronDown size={14} />
+            <Download size={16} /> {!busy ? 'Export' : progress && progress.total > 1 ? `Exporting ${progress.done} of ${progress.total}` : 'Exporting…'} <ChevronDown size={14} />
           </button>
         )}
       >
@@ -308,6 +316,12 @@ export function TopBar() {
           </div>
         )}
       </Popover>
+
+      {(busy === 'pdf' || busy === 'pngs') && (
+        <button className="btn" onClick={() => exportAbort.current?.abort()} title="Stop the export; nothing is downloaded">
+          Cancel
+        </button>
+      )}
 
       <div className="present-split">
         <button className="btn primary" onClick={() => navigate(`#/present/${deck.id}?s=${slideIndex()}`)} title="Present from this slide (Ctrl+Enter)">

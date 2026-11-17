@@ -2,7 +2,7 @@ import { sanitizeHtml } from '../render/richtext';
 import PptxGenJS from 'pptxgenjs';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
-import { getFontEmbedCSS, toJpeg, toPng } from 'html-to-image';
+import { getFontEmbedCSS, toCanvas, toSvg } from 'html-to-image';
 import JSZip from 'jszip';
 import type { Asset, Background, ChartElement, Deck, ImageElement, ShapeElement, SlideElement, TableElement, TextElement, Theme } from '../model/types';
 import { applyTokens, getLayout, resolveElement, slideBackground } from '../model/resolve';
@@ -427,37 +427,190 @@ export async function exportPptx(deck: Deck) {
 // Image and PDF export: render slides offscreen exactly as the editor draws them.
 // ---------------------------------------------------------------------------
 
-// Exported for scripts/browser-smoke.mjs, which checks the font CSS handed to `capture`.
+export interface ExportJob {
+  signal?: AbortSignal;
+  onProgress?: (done: number, total: number) => void;
+}
+
+let job: ExportJob = {};
+
+/** Runs an image or PDF export with progress reports and a way to cancel it. One export runs at a time. */
+export async function withExportJob<T>(next: ExportJob, run: () => Promise<T>): Promise<T> {
+  job = next;
+  try {
+    return await run();
+  } finally {
+    job = {};
+  }
+}
+
+type CaptureOptions = NonNullable<Parameters<typeof toCanvas>[1]>;
+
+// html-to-image copies every computed CSS property, about 500 of them, onto every element it
+// clones. A slide needs only the properties whose value differs from what the element gets with
+// no styles at all, so each slide is captured with that shorter list. html-to-image keeps the
+// first list it is given for as long as the page lives, hence one array that is refilled.
+const styleProps: string[] = [];
+let allStyleProps: string[] = [];
+let refillWorks: boolean | undefined;
+let unstyled: { frame: HTMLIFrameElement; byTag: Map<string, string[]> } | null = null;
+
+async function openUnstyled(host: HTMLElement) {
+  allStyleProps = Array.from(getComputedStyle(document.documentElement));
+  if (refillWorks === undefined) {
+    // Checked once: a version of html-to-image that copies the list would be stuck with the full one, which is slow but right.
+    const probe = host.appendChild(document.createElement('i'));
+    styleProps.splice(0, Infinity, ...allStyleProps);
+    await toSvg(probe, { includeStyleProperties: styleProps, skipFonts: true });
+    styleProps.splice(0, Infinity, 'opacity');
+    const svg = decodeURIComponent(await toSvg(probe, { includeStyleProperties: styleProps, skipFonts: true }));
+    refillWorks = svg.includes('opacity') && !svg.includes('display');
+    probe.remove();
+  }
+  // An empty document: its elements show the browser's own defaults for each tag.
+  const frame = host.appendChild(document.createElement('iframe'));
+  frame.style.cssText = 'position:absolute;width:0;height:0;border:0;visibility:hidden;';
+  const doc = frame.contentDocument!;
+  doc.open();
+  doc.write('<!doctype html><body>');
+  doc.close();
+  unstyled = { frame, byTag: new Map() };
+}
+
+function unstyledValues(el: Element): string[] {
+  const { frame, byTag } = unstyled!;
+  const tag = `${el.namespaceURI} ${el.localName}`;
+  let values = byTag.get(tag);
+  if (!values) {
+    const doc = frame.contentDocument!;
+    const probe = doc.body.appendChild(doc.createElementNS(el.namespaceURI, el.localName));
+    const style = frame.contentWindow!.getComputedStyle(probe);
+    values = allStyleProps.map((p) => style.getPropertyValue(p));
+    probe.remove();
+    byTag.set(tag, values);
+  }
+  return values;
+}
+
+function setStyleProps(node: HTMLElement) {
+  const all = allStyleProps;
+  let list = all;
+  if (refillWorks && unstyled) {
+    const need = all.map((p) => p === 'font-size'); // html-to-image rewrites font-size, so it is always copied
+    let pseudo = false;
+    for (const el of [node, ...Array.from(node.querySelectorAll('*'))]) {
+      // A ::before or ::after is copied with the same list but has other defaults: keep the full list.
+      pseudo = ['::before', '::after'].some((p) => !['', 'none'].includes(getComputedStyle(el, p).getPropertyValue('content')));
+      if (pseudo) break;
+      const own = getComputedStyle(el);
+      const plain = unstyledValues(el);
+      for (let i = 0; i < all.length; i++) if (!need[i] && own.getPropertyValue(all[i]) !== plain[i]) need[i] = true;
+    }
+    if (!pseudo) list = all.filter((_, i) => need[i]);
+  }
+  styleProps.splice(0, Infinity, ...list);
+}
+
+async function toPng(node: HTMLElement, options: CaptureOptions) {
+  setStyleProps(node);
+  return (await toCanvas(node, { ...options, includeStyleProperties: styleProps })).toDataURL();
+}
+
+async function toJpeg(node: HTMLElement, options: CaptureOptions) {
+  setStyleProps(node);
+  return (await toCanvas(node, { ...options, includeStyleProperties: styleProps })).toDataURL('image/jpeg', options.quality || 1);
+}
+
+interface FontRule {
+  css: string;
+  face: string;
+}
+
+// Family, style, weight, stretch and unicode range: what tells one @font-face from another.
+function faceKey(f: FontFace | CSSStyleDeclaration): string {
+  const get = (name: string, prop: 'family' | 'style' | 'weight' | 'stretch' | 'unicodeRange') => (f instanceof FontFace ? f[prop] : f.getPropertyValue(name));
+  const norm = (v: string, fallback: string) => (v || fallback).replace(/["'\s]/g, '').toLowerCase();
+  return [
+    norm(get('font-family', 'family'), ''),
+    norm(get('font-style', 'style'), 'normal'),
+    norm(get('font-weight', 'weight'), '400').replace('normal', '400').replace('bold', '700'),
+    norm(get('font-stretch', 'stretch'), 'normal').replace('100%', 'normal'),
+    norm(get('unicode-range', 'unicodeRange'), 'u+0-10ffff'),
+  ].join('|');
+}
+
+// The embedded @font-face rules of the families one slide uses. The CSS is repeated inside every
+// slide's image, so it carries only what the browser draws with: the faces it has loaded (the slide
+// is laid out by now, so every face it needs is among them), and of a face's files the WOFF2 one
+// when that is listed first, which is the one a browser that reads WOFF2 takes.
+async function slideFontCSS(node: HTMLElement, cache: Map<string, FontRule[]>): Promise<string> {
+  const families = new Set<string>();
+  for (const el of [node, ...Array.from(node.querySelectorAll<HTMLElement>('*'))]) {
+    if (!(el instanceof HTMLElement)) continue;
+    for (const f of (el.style.fontFamily || getComputedStyle(el).fontFamily).split(',')) families.add(f.trim().replace(/["']/g, ''));
+  }
+  const key = [...families].sort().join('|');
+  let rules = cache.get(key);
+  if (!rules) {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(await getFontEmbedCSS(node));
+    rules = Array.from(sheet.cssRules).map((rule) => {
+      const style = (rule as CSSFontFaceRule).style;
+      const src = style.getPropertyValue('src');
+      const woff2 = /^url\("[^"]*"\)\s*format\("woff2"\)(?=\s*,)/.exec(src);
+      return { css: woff2 ? rule.cssText.replace(src, () => woff2[0]) : rule.cssText, face: faceKey(style) };
+    });
+    cache.set(key, rules);
+  }
+  const known = new Set<string>();
+  const loaded = new Set<string>();
+  document.fonts.forEach((f) => {
+    known.add(faceKey(f));
+    if (f.status !== 'unloaded') loaded.add(faceKey(f));
+  });
+  return rules
+    .filter((r) => !known.has(r.face) || loaded.has(r.face))
+    .map((r) => r.css)
+    .join('\n');
+}
+
+// Slides are mounted and captured one at a time, so memory stays flat and Cancel takes effect
+// before the next slide. Exported for scripts/browser-smoke.mjs, which checks the font CSS handed
+// to `capture`.
 export async function renderSlides<T>(deck: Deck, indices: number[], capture: (node: HTMLElement, fontEmbedCSS: string) => Promise<T>): Promise<T[]> {
+  const { signal, onProgress } = job;
+  const cancelled = () => new DOMException('Export cancelled', 'AbortError');
   const host = document.createElement('div');
   host.setAttribute('aria-hidden', 'true');
   host.style.cssText = 'position:fixed;left:-20000px;top:0;pointer-events:none;';
   document.body.appendChild(host);
-  const root = createRoot(host);
+  const root = createRoot(host.appendChild(document.createElement('div')));
   try {
-    flushSync(() =>
-      root.render(
-        <div>
-          {indices.map((i) => (
-            <div key={i} data-export={i} style={{ width: deck.size.w, height: deck.size.h }}>
-              <SlideView deck={deck} slide={deck.slides[i]} mode="export" scale={1} index={i} />
-            </div>
-          ))}
-        </div>,
-      ),
-    );
-    await document.fonts.ready;
-    await Promise.all(Array.from(host.querySelectorAll('img')).map((img) => img.decode().catch(() => undefined)));
-    const nodes = Array.from(host.querySelectorAll<HTMLElement>('[data-export]'));
-    // Fonts of every exported slide, read once: html-to-image keeps the @font-face rules
-    // of the families used inside the element it is given, so it gets the wrapper of all slides.
-    const fontEmbedCSS = nodes.length ? await getFontEmbedCSS(host.firstElementChild as HTMLElement) : '';
+    await openUnstyled(host);
+    const fontRules = new Map<string, FontRule[]>();
     const out: T[] = [];
-    for (const n of nodes) out.push(await capture(n, fontEmbedCSS));
+    for (const i of indices) {
+      if (signal?.aborted) throw cancelled();
+      flushSync(() =>
+        root.render(
+          <div key={i} data-export={i} style={{ width: deck.size.w, height: deck.size.h }}>
+            <SlideView deck={deck} slide={deck.slides[i]} mode="export" scale={1} index={i} />
+          </div>,
+        ),
+      );
+      void host.offsetHeight; // lays the slide out, which starts loading the fonts it is drawn with
+      await document.fonts.ready;
+      await Promise.all(Array.from(host.querySelectorAll('img')).map((img) => img.decode().catch(() => undefined)));
+      const node = host.querySelector<HTMLElement>('[data-export]')!;
+      out.push(await capture(node, await slideFontCSS(node, fontRules)));
+      onProgress?.(out.length, indices.length);
+    }
+    if (signal?.aborted) throw cancelled();
     return out;
   } finally {
     root.unmount();
     host.remove();
+    unstyled = null;
   }
 }
 
