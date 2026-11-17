@@ -381,10 +381,31 @@ class ProtectedFileToolTests(unittest.TestCase):
             ask.assert_not_called()
             self.assertEqual(App.ask_password(app, self.contract), 'hunter2')
             self.assertEqual(ask.call_args.args[1], 'Password for contract.pdf:')
-        for typed in (None, 'wrong', ''):
+        for typed in ('wrong', ''):
             App, app, dialog = self.app(typed)
             with dialog, self.assertRaisesRegex(ValueError, 'contract.pdf'):
                 App.ask_password(app, self.contract)
+        App, app, dialog = self.app(None)
+        with dialog:
+            self.assertIsNone(App.ask_password(app, self.contract))  # Cancel
+
+    def test_cancel_on_the_password_dialog_stops_merge_and_compare_without_an_error(self):
+        # Like Cancel on Open's password dialog: no error box, nothing changed.
+        from app import App
+        for action in ('merge', 'compare'):
+            calls = []
+            _, app, dialog = self.app(None, busy=False, inline=None,
+                                      change=lambda *args: calls.append(args),
+                                      output=lambda ext: calls.append(ext),
+                                      compare_in_background=lambda *args: calls.append(args))
+            with dialog as ask, patch('app.mb.showerror') as error, \
+                    patch('app.fd.askopenfilenames', return_value=tuple(self.paths)), \
+                    patch('app.fd.askopenfilename', return_value=self.contract):
+                App.guard(app, lambda: getattr(App, action)(app))
+                ask.assert_called_once()  # report.pdf after contract.pdf is not asked about either
+            error.assert_not_called()
+            self.assertEqual((calls, self.status), ([], []), action)
+        self.assertEqual(len(self.pdf.doc), 1)
 
     def test_app_merge_asks_first_and_a_refusal_leaves_no_undo_step(self):
         changes = []
@@ -394,20 +415,23 @@ class ProtectedFileToolTests(unittest.TestCase):
                 try:
                     App.merge(app)
                 except ValueError as refusal:
+                    self.assertEqual(typed, 'wrong')
                     self.assertIn('contract.pdf', str(refusal))
             self.assertEqual(len(changes), steps, typed)
         self.assertEqual(len(self.pdf.doc), 3)
 
     def test_app_compare_asks_before_the_report_is_named_and_passes_the_password_on(self):
         started, named = [], []
-        for typed in (None, 'hunter2'):
+        for typed in (None, 'wrong', 'hunter2'):
             App, app, dialog = self.app(typed, output=lambda ext: named.append(ext) or str(self.root / 'diff.html'),
                                         compare_in_background=lambda *args: started.append(args))
             with dialog, patch('app.fd.askopenfilename', return_value=self.contract):
                 try:
                     App.compare(app)
                 except ValueError as refusal:
+                    self.assertEqual(typed, 'wrong')
                     self.assertIn('contract.pdf', str(refusal))
+                if typed != 'hunter2':
                     self.assertEqual((named, started), ([], []))
         self.assertEqual(started, [(self.contract, str(self.root / 'diff.html'), 'hunter2')])
 

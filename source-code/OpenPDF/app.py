@@ -144,13 +144,14 @@ class App(tk.Tk):
 
     def ask_password(self, path):
         # For a file a tool is about to read. Window thread only: it may open a
-        # dialog. '' for an unprotected file, which is not asked about.
+        # dialog. '' for an unprotected file, which is not asked about; None
+        # when the user cancels, which the caller treats like cancelling Open.
         if not PDF.locked(path):
             return ''
         name = Path(path).name
         password = sd.askstring('Password', f'Password for {name}:', show='*', parent=self)
         if password is None:
-            raise ValueError(f'{name} is password-protected and was not opened: no password was given.')
+            return None
         if PDF.locked(path, password):
             raise ValueError(f'{name} was not opened: that is not its password.')
         return password
@@ -526,7 +527,11 @@ class App(tk.Tk):
         self.require()
         paths = fd.askopenfilenames(filetypes=[('PDF', '*.pdf')])
         if paths:
-            passwords = {path: self.ask_password(path) for path in paths}
+            passwords = {}
+            for path in paths:
+                passwords[path] = self.ask_password(path)
+                if passwords[path] is None:
+                    return  # cancelled: nothing is added
             self.change(lambda: self.pdf.merge(paths, passwords))
 
     def select(self):
@@ -1135,6 +1140,8 @@ class App(tk.Tk):
         self.require()
         other = fd.askopenfilename(filetypes=[('PDF', '*.pdf')])
         password = self.ask_password(other) if other else ''
+        if password is None:
+            return  # cancelled
         path = self.output('.html') if other else None
         if path:
             self.compare_in_background(other, path, password)
@@ -1266,6 +1273,8 @@ class App(tk.Tk):
             try:
                 passwords[path] = self.ask_password(path)
             except Exception:  # refused, or not a PDF that can be opened at all
+                passwords[path] = None
+            if passwords[path] is None:  # skipped and named in the status; the rest go ahead
                 refused.append(path)
         chosen = [(path, target) for path, target in zip(paths, targets) if path not in refused]
         def done(result):
