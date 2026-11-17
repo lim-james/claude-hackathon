@@ -18,6 +18,7 @@ export interface AnimState {
 
 export interface ElementViewProps {
   el: SlideElement;
+  /** Fields read from it here must also be listed in thumbEqual (editor/thumbEqual.ts). */
   deck: Deck;
   mode: RenderMode;
   tokens: TokenContext;
