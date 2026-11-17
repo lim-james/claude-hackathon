@@ -4,12 +4,14 @@ Snapshots live under a per-user directory (never next to the document and never
 uploaded). Each tracked document gets a folder named from a hash of its absolute
 path, holding the snapshot PDFs plus an index.json of metadata.
 
-Saving a version whose content is already stored adds nothing: the stored
-version already restores that state, and a second entry would only crowd out
-distinct ones. Records carry a content ``key`` and the ``file`` they point at
-(old records have neither and point at their own id). Each document keeps at
-most LIMIT snapshot files; saving one more removes the oldest, and the dialog
-says so first.
+Saving a version when nothing changed since the newest one adds nothing.
+Saving a state that an older version holds adds a new entry, dated now, that
+shares that version's file instead of writing another copy. Records carry a
+content ``key`` and the ``file`` they point at (old records have neither and
+point at their own id). Each document keeps at most LIMIT snapshot files, aged
+by their newest entry; saving one more removes the oldest, and the dialog says
+so first. Beyond LIMIT entries, the oldest entry whose file a newer entry
+still points at goes first: that removes no saved state.
 Records also hold the document's full ``path``, so the history of a file that
 was moved or deleted can be found again (``orphans``) and cleared.
 """
@@ -121,6 +123,16 @@ def _over_limit(doc_dir, stored, room):
     return [r for r in stored if _record_file(doc_dir, r) in drop]
 
 
+def _extra_entries(doc_dir, records, limit):
+    """Beyond ``limit`` entries (``records`` oldest first), the oldest whose file
+    a newer entry still points at: dropping them removes no saved state."""
+    extra = len(records) - max(1, limit)
+    if extra <= 0:
+        return []
+    newest = {_record_file(doc_dir, r): r for r in records}
+    return [r for r in records if newest[_record_file(doc_dir, r)] is not r][:extra]
+
+
 def next_removal(path, limit=LIMIT):
     """The versions that saving one more distinct version of ``path`` would remove."""
     doc_dir = _doc_dir(path)
@@ -129,13 +141,16 @@ def next_removal(path, limit=LIMIT):
 
 
 def save_version(path, data, label='', key=None, limit=LIMIT, confirm=None):
-    """Record a version of ``path``. When its content is already stored nothing
-    is recorded or removed, and a copy of the stored record is returned with
-    ``unchanged`` set. Otherwise, beyond ``limit`` files the oldest go; with
-    ``confirm``, it is called first with the records that would go and nothing
-    is saved (None is returned) unless it returns True. With a ``key``, ``data``
-    may be a function, called only when the content is new (an encrypted
-    snapshot is slow to make)."""
+    """Record a version of ``path``. When nothing changed since the newest
+    version, nothing is recorded or removed, and a copy of that record is
+    returned with ``unchanged`` set. When an older version holds this state, a
+    new record dated now shares its file (``same_as`` names that version, and
+    ``replaced`` is True when the limit on entries dropped its older entry);
+    no file is written or removed. Otherwise, beyond ``limit`` files the oldest
+    go; with ``confirm``, it is called first with the records that would go and
+    nothing is saved (None is returned) unless it returns True. With a ``key``,
+    ``data`` may be a function, called only when the content is new (an
+    encrypted snapshot is slow to make)."""
     if callable(data) and key is None:
         data = data()
     if not callable(data) and not data:
@@ -147,7 +162,8 @@ def save_version(path, data, label='', key=None, limit=LIMIT, confirm=None):
     if plain:
         key = content_key(data)
     stored = _stored(doc_dir, index)
-    for record in reversed(stored):
+    match = None
+    for record in reversed(stored):  # newest first
         known = record.get('key')
         if known is None and plain and record.get('bytes') == len(data):
             # Saved before keys existed: fingerprint it once, only when the size matches.
@@ -161,32 +177,50 @@ def save_version(path, data, label='', key=None, limit=LIMIT, confirm=None):
                 except OSError:
                     pass
         if known == key:
-            return dict(record, unchanged=True)
-    removed = _over_limit(doc_dir, stored, max(1, limit) - 1)
-    if confirm is not None and not confirm(removed):
-        return None
-    if callable(data):
-        data = data()
-        if not data:
-            raise ValueError('Nothing to snapshot yet.')
+            match = record
+            break
+    if match is not None and match is stored[-1]:
+        return dict(match, unchanged=True)
     version_id = time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6]
-    written = doc_dir / f'{version_id}.pdf'
-    _write_atomic(written, data)
-    try:
-        with fitz.open(stream=data, filetype='pdf') as doc:
-            pages = len(doc)
-    except Exception:
-        pages = 0
-    record = {'id': version_id, 'created': time.time(), 'label': label.strip(),
-              'source': Path(path).name, 'path': str(Path(path).resolve()), 'pages': pages,
-              'bytes': len(data), 'key': key, 'file': version_id}
+    written = None
+    if match is not None:
+        # Back to a state an older version holds: a new entry, dated now, sharing
+        # its file. That file's age is now this entry's, so it is not the next to go.
+        removed = []
+        record = {'id': version_id, 'created': time.time(), 'label': label.strip(),
+                  'source': Path(path).name, 'path': str(Path(path).resolve()),
+                  'pages': match.get('pages', 0), 'bytes': match.get('bytes', 0), 'key': key,
+                  'file': match.get('file') or match['id']}
+    else:
+        removed = _over_limit(doc_dir, stored, max(1, limit) - 1)
+        if confirm is not None and not confirm(removed):
+            return None
+        if callable(data):
+            data = data()
+            if not data:
+                raise ValueError('Nothing to snapshot yet.')
+        written = doc_dir / f'{version_id}.pdf'
+        _write_atomic(written, data)
+        try:
+            with fitz.open(stream=data, filetype='pdf') as doc:
+                pages = len(doc)
+        except Exception:
+            pages = 0
+        record = {'id': version_id, 'created': time.time(), 'label': label.strip(),
+                  'source': Path(path).name, 'path': str(Path(path).resolve()), 'pages': pages,
+                  'bytes': len(data), 'key': key, 'file': version_id}
+    left = [r for r in stored if not any(r is gone for gone in removed)] + [record]
+    removed = removed + _extra_entries(doc_dir, left, limit)
     kept = [r for r in index if not any(r is gone for gone in removed)] + [record]
     try:
         _save_index(doc_dir, kept)
     except BaseException:
-        written.unlink(missing_ok=True)
+        if written is not None:
+            written.unlink(missing_ok=True)
         raise
     _remove_unreferenced(doc_dir, kept, removed)
+    if match is not None:
+        return dict(record, same_as=dict(match), replaced=any(r is match for r in removed))
     return record
 
 
