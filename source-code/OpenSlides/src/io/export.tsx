@@ -194,8 +194,12 @@ async function backgroundImage(bg: Background, deck: Deck, pxW: number, pxH: num
     const cx = c.width / 2;
     const cy = c.height / 2;
     const g = ctx.createLinearGradient(cx - (Math.cos(a) * len) / 2, cy - (Math.sin(a) * len) / 2, cx + (Math.cos(a) * len) / 2, cy + (Math.sin(a) * len) / 2);
-    g.addColorStop(0, resolveColor(bg.from, deck.theme));
-    g.addColorStop(1, resolveColor(bg.to, deck.theme));
+    try {
+      g.addColorStop(0, resolveColor(bg.from, deck.theme));
+      g.addColorStop(1, resolveColor(bg.to, deck.theme));
+    } catch {
+      return null; // a colour the browser can't read: no background, as the editor draws it
+    }
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, c.width, c.height);
     return c.toDataURL('image/png');
@@ -204,9 +208,11 @@ async function backgroundImage(bg: Background, deck: Deck, pxW: number, pxH: num
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, c.width, c.height);
   if (asset) {
-    const img = await loadImg(asset.dataUrl);
-    const s = Math.max(c.width / img.naturalWidth, c.height / img.naturalHeight);
-    ctx.drawImage(img, (c.width - img.naturalWidth * s) / 2, (c.height - img.naturalHeight * s) / 2, img.naturalWidth * s, img.naturalHeight * s);
+    const img = await loadImg(asset.dataUrl).catch(() => null); // an image that can't be read is left out, as the editor does
+    if (img) {
+      const s = Math.max(c.width / img.naturalWidth, c.height / img.naturalHeight);
+      ctx.drawImage(img, (c.width - img.naturalWidth * s) / 2, (c.height - img.naturalHeight * s) / 2, img.naturalWidth * s, img.naturalHeight * s);
+    }
   }
   ctx.fillStyle = `rgba(0,0,0,${bg.dim})`;
   ctx.fillRect(0, 0, c.width, c.height);
@@ -262,7 +268,9 @@ export async function buildPptx(deck: Deck): Promise<PptxGenJS> {
         const key = `${asset.id}|${el.w}|${el.h}|${el.fit}|${el.radius}|${JSON.stringify(el.filters)}`;
         let data = bakeCache.get(key);
         if (!data) {
-          data = await bakeImage(asset, el);
+          const baked = await bakeImage(asset, el).catch(() => null);
+          if (!baked) continue; // an image that can't be read is left out
+          data = baked;
           bakeCache.set(key, data);
         }
         s.addImage({ data, ...pos, altText: xmlSafe(el.alt ?? '') || undefined, transparency } as PptxGenJS.ImageProps);
@@ -339,6 +347,7 @@ function addChart(pptx: PptxGenJS, s: PptxGenJS.Slide, el: ChartElement, pos: Po
   };
   const isPie = el.chartType === 'pie' || el.chartType === 'doughnut';
   const series = isPie ? el.data.series.slice(0, 1) : el.data.series;
+  if (!series.length) return; // nothing to plot, and PowerPoint has no chart without a series
   const labels = el.data.labels.map(xmlSafe);
   const data = series.map((sr) => ({ name: xmlSafe(sr.name), labels, values: el.data.labels.map((_, i) => sr.values[i] ?? 0) }));
   const colors = chartColors(el, theme).map((c) => (toHex(c) ?? '#000000').slice(1).toUpperCase());
@@ -386,6 +395,7 @@ function addChart(pptx: PptxGenJS, s: PptxGenJS.Slide, el: ChartElement, pos: Po
 }
 
 function addTable(s: PptxGenJS.Slide, el: TableElement, pos: Pos, theme: Theme, ptPerPx: number) {
+  if (!el.rows.length) return; // PowerPoint has no table without a row
   const st = el.style;
   const cols = Math.max(1, ...el.rows.map((r) => r.length));
   const border = hex6(st.borderColor, theme);
@@ -458,15 +468,20 @@ async function renderSlides<T>(deck: Deck, indices: number[], capture: (node: HT
   }
 }
 
+/** Options for one slide capture. An image that can't be read is left blank, as the editor shows it, instead of failing the export. */
+function capture(deck: Deck, fontEmbedCSS: string) {
+  return { width: deck.size.w, height: deck.size.h, pixelRatio: 1, fontEmbedCSS, onImageErrorHandler: () => undefined };
+}
+
 export async function exportPng(deck: Deck, index: number) {
-  const [url] = await renderSlides(deck, [index], (n, css) => toPng(n, { width: deck.size.w, height: deck.size.h, pixelRatio: 1, fontEmbedCSS: css }));
+  const [url] = await renderSlides(deck, [index], (n, css) => toPng(n, { ...capture(deck, css) }));
   const blob = await (await fetch(url)).blob();
   downloadBlob(blob, `${safeFilename(deck.title)} - slide ${index + 1}.png`);
 }
 
 export async function exportAllPngs(deck: Deck) {
   const indices = deck.slides.map((_, i) => i);
-  const urls = await renderSlides(deck, indices, (n, css) => toPng(n, { width: deck.size.w, height: deck.size.h, pixelRatio: 1, fontEmbedCSS: css }));
+  const urls = await renderSlides(deck, indices, (n, css) => toPng(n, { ...capture(deck, css) }));
   const zip = new JSZip();
   urls.forEach((u, i) => zip.file(`slide-${String(i + 1).padStart(2, '0')}.png`, u.split(',')[1], { base64: true }));
   downloadBlob(await zip.generateAsync({ type: 'blob' }), `${safeFilename(deck.title)} slides.zip`);
@@ -476,7 +491,7 @@ export async function exportPdf(deck: Deck) {
   const { jsPDF } = await import('jspdf');
   const indices = deck.slides.map((_, i) => i).filter((i) => !deck.slides[i].hidden);
   const list = indices.length ? indices : deck.slides.map((_, i) => i);
-  const urls = await renderSlides(deck, list, (n, css) => toJpeg(n, { width: deck.size.w, height: deck.size.h, pixelRatio: 1, quality: 0.92, fontEmbedCSS: css, backgroundColor: '#ffffff' }));
+  const urls = await renderSlides(deck, list, (n, css) => toJpeg(n, { ...capture(deck, css), quality: 0.92, backgroundColor: '#ffffff' }));
   const { inW, inH } = slideInches(deck.size);
   const pw = inW * 72;
   const ph = inH * 72;
