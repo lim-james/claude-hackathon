@@ -746,7 +746,7 @@ class App(tk.Tk):
         def apply():
             buffer = io.BytesIO()
             img.save(buffer, format='PNG')
-            self.guard(lambda: self.change(lambda: self.pdf.doc[self.index].insert_image(rect, stream=buffer.getvalue())))
+            self.guard(lambda: self.change(lambda: self.pdf.add_signature(self.index, rect, buffer.getvalue())))
             window.destroy()
         canvas.bind('<Button-1>', start)
         canvas.bind('<B1-Motion>', move)

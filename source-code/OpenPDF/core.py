@@ -32,6 +32,28 @@ def page_numbers(spec, count):
     return result
 
 
+def _page_to_pdf(page):
+    """Matrix from the page as shown (rotated, cropped, top-left origin) to PDF
+    space. It is MuPDF's own page transform, the one rendering uses;
+    ``page.transformation_matrix`` drops the crop box offset on rotated pages.
+    Same as ``outline_tools._page_to_pdf`` (#113).
+    """
+    ctm = fitz.mupdf.FzMatrix()
+    fitz.mupdf.pdf_page_transform(fitz.mupdf.pdf_page_from_fz_page(page.this), fitz.mupdf.FzRect(), ctm)
+    return ~fitz.Matrix(ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f)
+
+
+def _insert_upright_image(page, rect, **image):
+    """Draw an image upright in ``rect`` (unrotated page space, as ``app.rect()``
+    gives it) on a page of any /Rotate. ``insert_image`` reads its rect through
+    ``page.transformation_matrix``, so the target is built from the page as shown
+    with MuPDF's own transform instead of ``derotation_matrix``.
+    """
+    shown = fitz.Rect(rect) * page.rotation_matrix
+    target = shown * _page_to_pdf(page) * page.transformation_matrix
+    page.insert_image(target, keep_proportion=True, rotate=page.rotation, **image)
+
+
 class PDF:
     def __init__(self, path=None, password=''):
         self.doc = fitz.open(path) if path else fitz.open()
@@ -293,7 +315,10 @@ class PDF:
             self.doc.embfile_del(name)
 
     def add_image(self, index, rect, path):
-        self.doc[index].insert_image(rect, filename=str(path), keep_proportion=True)
+        _insert_upright_image(self.doc[index], rect, filename=str(path))
+
+    def add_signature(self, index, rect, png):
+        _insert_upright_image(self.doc[index], rect, stream=png)
 
     def highlight(self, index, text):
         page = self.doc[index]
@@ -332,7 +357,7 @@ class PDF:
         if not text.strip():
             raise ValueError('Enter callout text.')
         page = self.doc[index]
-        annot = page.add_freetext_annot(rect, text, fontsize=size)
+        annot = page.add_freetext_annot(rect, text, fontsize=size, rotate=page.rotation)
         annot.set_info(title=author)
         annot.update()
         return annot
@@ -340,7 +365,9 @@ class PDF:
     def shape(self, index, kind, rect, color=(0.16, 0.16, 0.55), width=1.5, author='OpenPDF'):
         page = self.doc[index]
         if kind in ('line', 'arrow'):
-            annot = page.add_line_annot(rect.tl, rect.br)
+            # Run from the top left to the bottom right of the area as shown.
+            shown = fitz.Rect(rect) * page.rotation_matrix
+            annot = page.add_line_annot(shown.tl * page.derotation_matrix, shown.br * page.derotation_matrix)
             if kind == 'arrow':
                 annot.set_line_ends(fitz.PDF_ANNOT_LE_NONE, fitz.PDF_ANNOT_LE_OPEN_ARROW)
         elif kind == 'rectangle':
@@ -364,9 +391,23 @@ class PDF:
         if not 0 <= stamp_id < len(self.STAMPS):
             raise ValueError('Unknown stamp.')
         page = self.doc[index]
+        rect = fitz.Rect(rect)
+        if page.rotation:
+            # MuPDF fits the stamp to the rect's unrotated width and height, then
+            # turns it with /Rotate: give it the area's size as shown, same centre.
+            shown = rect * page.rotation_matrix
+            centre = (rect.tl + rect.br) / 2
+            rect = fitz.Rect(centre, centre) + (-shown.width / 2, -shown.height / 2, shown.width / 2, shown.height / 2)
         annot = page.add_stamp_annot(rect, stamp=stamp_id)
+        if page.rotation:
+            annot.set_rotation(page.rotation)
         annot.set_info(title=author)
         annot.update()
+        if page.rotation:
+            # MuPDF leaves a rotated stamp flagged for a new appearance, and
+            # redrawing it from the rotated Rect shrinks it, which the next
+            # annotation added to the page would trigger. This one is final.
+            fitz.mupdf.pdf_set_annot_resynthesised(annot.this)
         return annot
 
     def annotations(self):
