@@ -5,7 +5,9 @@ import difflib
 import html
 import io
 import os
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -195,9 +197,23 @@ class PDF:
     @staticmethod
     def _atomic_write(path, data):
         # Atomic replacement avoids truncating a source PDF that is still open.
+        # Create the temp file like a plain open() would (0666 minus the umask),
+        # not mkstemp's 0600, and keep the old file's mode when overwriting.
         target = Path(path)
-        fd, tmp = tempfile.mkstemp(dir=target.parent, suffix='.pdf')
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
+        while True:
+            tmp = str(target.parent / f'.{target.name}.{secrets.token_hex(6)}.tmp')
+            try:
+                fd = os.open(tmp, flags, 0o666)
+                break
+            except FileExistsError:
+                continue
         try:
+            if os.name != 'nt':  # Windows has no POSIX modes; leave it as before
+                try:
+                    os.fchmod(fd, stat.S_IMODE(os.stat(target).st_mode))
+                except OSError:
+                    pass  # new file, or a mode we may not set: keep the umask default
             with os.fdopen(fd, 'wb') as handle:
                 handle.write(data)
             os.replace(tmp, target)

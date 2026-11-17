@@ -1,5 +1,7 @@
 import importlib.util
 import io
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,3 +49,20 @@ class WordTests(unittest.TestCase):
         finally:
             pdf.close()
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX file modes')
+    def test_export_keeps_mode_and_uses_umask(self):
+        # Word export writes the chosen file directly; guard it alongside #107.
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        with tempfile.TemporaryDirectory() as folder:
+            pdf = PDF()
+            pdf.doc.new_page().insert_text((50, 60), 'Shared notes')
+            try:
+                path = Path(folder) / 'notes.docx'
+                pdf.export_docx(path)
+                self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o644)
+                os.chmod(path, 0o664)
+                pdf.export_docx(path)
+                self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o664)
+            finally:
+                pdf.close()

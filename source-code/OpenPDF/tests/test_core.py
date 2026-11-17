@@ -1,6 +1,9 @@
+import os
+import stat
 import tempfile
 import shutil
 import unittest
+from unittest import mock
 from pathlib import Path
 import fitz
 from PIL import Image
@@ -162,6 +165,98 @@ class PDFTests(unittest.TestCase):
         actual = displayed * page.derotation_matrix
         self.pdf.redact(0, actual)
         self.assertNotIn('123456', self.pdf.doc[0].get_text())
+
+
+class SavedFileModeTests(unittest.TestCase):
+    """Writes to a user-chosen path keep the old file's mode, or use the umask (#107)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.pdf = PDF()
+        self.pdf.doc.new_page().insert_text((72, 72), 'Shared report text')
+
+    def tearDown(self):
+        self.pdf.close()
+        self.tmp.cleanup()
+
+    def writers(self):
+        return {'save': self.pdf.save,
+                'password export': lambda path: self.pdf.save(path, 'secret'),
+                'optimize': self.pdf.optimize}
+
+    def test_writes_round_trip_and_leave_no_temp_files(self):
+        for name, write in self.writers().items():
+            with self.subTest(name):
+                path = self.root / f'{name}.pdf'
+                write(path)
+                write(path)  # overwrite an existing file too
+                with fitz.open(path) as check:
+                    if check.needs_pass:
+                        check.authenticate('secret')
+                    self.assertIn('Shared report text', check[0].get_text())
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()),
+                         ['optimize.pdf', 'password export.pdf', 'save.pdf'])
+
+    def mode(self, path):
+        return stat.S_IMODE(os.stat(path).st_mode)
+
+    def with_umask(self, value):
+        old = os.umask(value)
+        self.addCleanup(os.umask, old)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file modes')
+    def test_overwrite_keeps_existing_mode(self):
+        self.with_umask(0o022)
+        for name, write in self.writers().items():
+            for mode in (0o644, 0o664, 0o600):
+                with self.subTest(name, mode=oct(mode)):
+                    path = self.root / f'{name}-{mode:o}.pdf'
+                    self.pdf.save(path)
+                    os.chmod(path, mode)
+                    write(path)
+                    self.assertEqual(self.mode(path), mode)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file modes')
+    def test_new_file_uses_umask_default(self):
+        for umask, expected in ((0o022, 0o644), (0o077, 0o600)):
+            self.with_umask(umask)
+            for name, write in self.writers().items():
+                with self.subTest(name, umask=oct(umask)):
+                    path = self.root / f'{name}-new-{umask:o}.pdf'
+                    write(path)
+                    self.assertEqual(self.mode(path), expected)
+            folder = self.root / f'split-{umask:o}'
+            folder.mkdir()
+            self.pdf.split(folder)
+            self.assertEqual({self.mode(p) for p in folder.iterdir()}, {expected})
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file modes')
+    def test_save_still_works_when_mode_cannot_be_copied(self):
+        self.with_umask(0o022)
+        path = self.root / 'theirs.pdf'
+        self.pdf.save(path)
+        os.chmod(path, 0o664)
+        with mock.patch('core.os.fchmod', side_effect=PermissionError):
+            self.pdf.save(path)
+        self.assertEqual(self.mode(path), 0o644)
+        with fitz.open(path) as check:
+            self.assertIn('Shared report text', check[0].get_text())
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX file modes')
+    def test_save_over_the_open_source_file(self):
+        path = self.root / 'source.pdf'
+        self.pdf.save(path)
+        os.chmod(path, 0o644)
+        reopened = PDF(path)
+        try:
+            reopened.doc.new_page()
+            reopened.save(path)
+        finally:
+            reopened.close()
+        self.assertEqual(self.mode(path), 0o644)
+        with fitz.open(path) as check:
+            self.assertEqual(len(check), 2)
 
 
 if __name__ == '__main__':
