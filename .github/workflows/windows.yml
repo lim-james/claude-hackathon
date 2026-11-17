@@ -39,7 +39,7 @@ jobs:
           npm run dev --prefix source-code/OpenSlides -- --host 127.0.0.1 > /tmp/openslides-vite.log 2>&1 &
           python3 -m http.server 4173 --directory site > /tmp/opensuite-http.log 2>&1 &
           for attempt in {1..30}; do curl --silent --fail http://127.0.0.1:5173 > /dev/null && break; sleep 1; done
-          (cd source-code/OpenSlides && node scripts/browser-smoke.mjs)
+          (cd source-code/OpenSlides && node scripts/browser-smoke.mjs && node scripts/pptx-xml-smoke.mjs)
           node scripts/home-smoke.mjs
       - uses: actions/upload-artifact@v4
         if: always()

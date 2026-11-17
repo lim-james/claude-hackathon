@@ -26,7 +26,7 @@ Open **Ask Claudia → settings** to enter an Anthropic API key. Defaults match 
 
 Each Generate click makes one billable request. Cancel stops waiting for it, but Anthropic may still bill already processed tokens. AI actions are validated and previewed; applying a proposal is one undoable edit. A deck changed during generation requires a fresh proposal. Standard shapes/diagrams are native editable elements; generated graphics are sanitized SVG image assets. Custom agents choose from element, outline, rewrite, notes and theme tools, and can be exported/imported as JSON. No background agent execution is performed.
 
-Run `npm test` for schema and proxy checks. `scripts/browser-smoke.mjs` drives a running Vite app with Playwright and mocked Anthropic responses (no credits required); CI installs its browser dependencies separately. Additional font licences are in `public/fonts/LICENSES/`.
+Run `npm test` for schema and proxy checks. `scripts/browser-smoke.mjs` drives a running Vite app with Playwright and mocked Anthropic responses (no credits required). `npm run smoke:pptx-xml` (`scripts/pptx-xml-smoke.mjs`) checks against the same running app that `.pptx` exports stay well-formed XML and that a damaged slide is reported on import, not read as an empty slide. CI runs both and installs its browser dependencies separately. Additional font licences are in `public/fonts/LICENSES/`.
 
 ## The problem
 
