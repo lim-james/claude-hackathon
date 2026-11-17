@@ -30,7 +30,8 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        // The DejaVu and Latin Modern subsets ship only as .woff (src/styles/fonts); the other .woff files duplicate cached .woff2.
+        globPatterns: ['**/*.{js,css,html,svg,png,woff2}', 'assets/{dejavu,latin-modern}-*.woff'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
         navigateFallback: 'index.html',
       },
@@ -39,4 +40,10 @@ export default defineConfig({
   build: {
     chunkSizeWarningLimit: 2500,
   },
+  // Exports embed fonts by resolving their stylesheet URLs through a <base> element, which the desktop
+  // CSP (base-uri 'none') blocks; root-absolute font URLs resolve the same either way. The desktop app
+  // always serves from the root of deckforge://app/.
+  experimental: desktop
+    ? { renderBuiltUrl: (filename, { hostType }) => (hostType === 'css' && /\.woff2?$/.test(filename) ? '/' + filename : { relative: true }) }
+    : undefined,
 });
