@@ -1,4 +1,5 @@
 import errno
+import json
 import os
 import tempfile
 import unittest
@@ -210,3 +211,162 @@ class ProtectedDocumentVersionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HistorySizeTests(unittest.TestCase):
+    """Issue #104: unchanged versions are stored once, the history has a stated
+    limit, and histories of moved files can be found and cleared."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.history = Path(self.tmp.name) / 'history'
+        os.environ['OPENPDF_HISTORY_DIR'] = str(self.history)
+        self.doc_path = str(Path(self.tmp.name) / 'report.pdf')
+        Path(self.doc_path).write_bytes(make_pdf(pages=3, text='report'))
+        self.pdf = PDF(self.doc_path)
+
+    def tearDown(self):
+        self.pdf.close()
+        os.environ.pop('OPENPDF_HISTORY_DIR', None)
+        self.tmp.cleanup()
+
+    def stored_files(self):
+        return sorted(self.history.rglob('*.pdf'))
+
+    def test_unchanged_saves_store_one_copy(self):
+        # What Save version passes for an unprotected document; each call renews the trailer /ID.
+        datas = [self.pdf.doc.tobytes(garbage=4, deflate=True) for _ in range(5)]
+        self.assertNotEqual(datas[0], datas[1])
+        for n, data in enumerate(datas):
+            versions.save_version(self.doc_path, data, f'v{n + 1}')
+        self.assertEqual(len(versions.list_versions(self.doc_path)), 5)
+        self.assertEqual(len(self.stored_files()), 1)
+        self.pdf.doc[0].insert_text((72, 144), 'an edit')
+        versions.save_version(self.doc_path, self.pdf.doc.tobytes(garbage=4, deflate=True), 'edited')
+        self.assertEqual(len(self.stored_files()), 2)
+
+    def test_saving_one_past_the_limit_removes_the_oldest(self):
+        records = []
+        for n in range(4):
+            self.pdf.doc[0].insert_text((72, 100 + 12 * n), f'edit {n}')
+            self.assertEqual(len(versions.next_removal(self.doc_path, limit=3)), 1 if n >= 3 else 0)
+            records.append(versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), f'v{n}', limit=3))
+        self.assertEqual([r['label'] for r in versions.list_versions(self.doc_path)], ['v3', 'v2', 'v1'])
+        self.assertEqual(len(self.stored_files()), 3)
+        self.assertFalse(versions.version_file(self.doc_path, records[0]['id']).exists())
+        self.assertEqual(versions.LIMIT, 20)
+
+    def test_deleting_one_of_two_versions_sharing_a_file_keeps_the_other(self):
+        data = self.pdf.snapshot_bytes()
+        a = versions.save_version(self.doc_path, data, 'a')
+        b = versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'b')
+        self.assertEqual(b['file'], a['id'])
+        versions.delete_version(self.doc_path, a['id'])
+        restored = PDF.unlocked(versions.read_version(self.doc_path, b['id']))
+        self.assertEqual(len(restored), 3)
+        restored.close()
+        versions.delete_version(self.doc_path, b['id'])
+        self.assertEqual(self.stored_files(), [])
+
+    def test_trimming_a_shared_version_keeps_the_file_for_the_newer_one(self):
+        versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'a', limit=2)
+        self.pdf.doc[0].insert_text((72, 144), 'edit')
+        versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'b', limit=2)
+        self.pdf.doc[0].insert_text((72, 160), 'more')
+        same = self.pdf.snapshot_bytes()
+        versions.save_version(self.doc_path, same, 'c', limit=2)       # removes a
+        c2 = versions.save_version(self.doc_path, same, 'c again', limit=2)  # removes b, shares c's file
+        self.assertEqual([r['label'] for r in versions.list_versions(self.doc_path)], ['c again', 'c'])
+        self.assertEqual(len(self.stored_files()), 1)
+        self.assertTrue(versions.version_file(self.doc_path, c2['id']).exists())
+
+    def test_index_written_before_keys_still_lists_restores_and_dedupes(self):
+        doc_dir = versions._doc_dir(self.doc_path)
+        doc_dir.mkdir(parents=True)
+        data = self.pdf.doc.tobytes(garbage=4, deflate=True)
+        (doc_dir / '20260101-000000-abcdef.pdf').write_bytes(data)
+        (doc_dir / 'index.json').write_text(json.dumps([{   # the record today's master writes
+            'id': '20260101-000000-abcdef', 'created': 1.0, 'label': 'old', 'source': 'report.pdf',
+            'pages': 3, 'bytes': len(data)}]), encoding='utf-8')
+        self.assertEqual([r['label'] for r in versions.list_versions(self.doc_path)], ['old'])
+        self.assertEqual(versions.read_version(self.doc_path, '20260101-000000-abcdef'), data)
+        self.assertTrue(versions.next_removal(self.doc_path) == [])
+        versions.save_version(self.doc_path, self.pdf.doc.tobytes(garbage=4, deflate=True), 'new')
+        self.assertEqual(len(self.stored_files()), 1)
+        self.assertEqual(len(versions.list_versions(self.doc_path)), 2)
+
+    def test_history_of_a_renamed_file_can_be_found_and_cleared(self):
+        for n in range(2):
+            self.pdf.doc[0].insert_text((72, 144 + 12 * n), f'edit {n}')
+            versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), f'v{n}')
+        self.pdf.close()
+        renamed = str(Path(self.tmp.name) / 'renamed.pdf')
+        os.rename(self.doc_path, renamed)
+        self.pdf = PDF(renamed)
+        self.assertEqual(versions.list_versions(renamed), [])
+        found = versions.orphans(exclude=renamed)
+        self.assertEqual([(o['path'], o['versions']) for o in found], [(str(Path(self.doc_path).resolve()), 2)])
+        self.assertGreater(found[0]['bytes'], 0)
+        versions.clear_orphan(found[0]['folder'])
+        self.assertEqual(versions.orphans(exclude=renamed), [])
+        self.assertEqual(sum(f.stat().st_size for f in self.history.rglob('*') if f.is_file()), 0)
+        with self.assertRaises(ValueError):
+            versions.clear_orphan('..')
+
+    def test_a_document_still_in_place_is_not_an_orphan(self):
+        versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'v')
+        self.assertEqual(versions.orphans(), [])
+        versions.clear_history(self.doc_path)
+        self.assertEqual((versions.list_versions(self.doc_path), versions.usage(self.doc_path)), ([], (0, 0)))
+
+    def test_restore_adds_no_copy_when_the_current_state_is_stored(self):
+        from app import App
+        first = versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'v1')
+        self.pdf.doc[0].insert_text((72, 144), 'edit')
+        versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'v2')
+        app = SimpleNamespace(pdf=self.pdf, path=self.doc_path, password='', history=[], redo_history=[],
+                              dirty=False, refresh=lambda: None, status=SimpleNamespace(set=lambda _m: None))
+        App._restore_version(app, first['id'])
+        self.assertEqual([r['label'] for r in versions.list_versions(self.doc_path)], ['v2', 'v1'])
+        self.assertEqual(len(self.stored_files()), 2)
+        self.pdf.doc[0].insert_text((72, 160), 'unsaved edit')
+        App._restore_version(app, first['id'])                   # this state is new: it is kept
+        self.assertEqual(versions.list_versions(self.doc_path)[0]['label'], 'Before restore')
+
+    def test_a_failed_snapshot_write_leaves_the_index_and_no_partial_file(self):
+        versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'kept')
+        index = versions._index_file(versions._doc_dir(self.doc_path))
+        before = index.read_bytes()
+        self.pdf.doc[0].insert_text((72, 144), 'edit')
+        real_replace = os.replace
+        def full_disk(src, dst):
+            if str(dst).endswith('index.json'):
+                raise OSError(errno.ENOSPC, 'No space left on device')
+            return real_replace(src, dst)
+        with patch('versions.os.replace', side_effect=full_disk):
+            with self.assertRaises(OSError):
+                versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'lost')
+        self.assertEqual(index.read_bytes(), before)
+        self.assertEqual(len(self.stored_files()), 1)
+        self.assertEqual([f.name for f in index.parent.iterdir() if f.suffix == '.tmp'], [])
+
+
+class ProtectedHistorySizeTests(ProtectedDocumentVersionTests):
+    def keyed_snapshot(self, label):
+        from app import save_snapshot  # what Save version runs
+        return save_snapshot(self.app(self.PASSWORD), label)
+
+    def test_unchanged_protected_saves_store_one_encrypted_copy(self):
+        a = self.keyed_snapshot('a')
+        with patch.object(self.pdf, 'snapshot_bytes', wraps=self.pdf.snapshot_bytes) as encrypt:
+            b = self.keyed_snapshot('b')
+        encrypt.assert_not_called()  # content already stored: no slow encrypted copy is made
+        self.assertEqual(b['file'], a['id'])
+        files = list(self.history.rglob('*.pdf'))
+        self.assertEqual(len(files), 1)
+        self.assert_protected(files[0])
+        self.assertNotEqual(a['key'], versions.content_key(self.pdf.doc.tobytes(
+            garbage=4, deflate=True, no_new_id=True, encryption=fitz.PDF_ENCRYPT_NONE)))  # keyed with the password
+        self.pdf.doc[0].insert_text((72, 144), 'edit')
+        self.keyed_snapshot('c')
+        self.assertEqual(len(list(self.history.rglob('*.pdf'))), 2)

@@ -203,6 +203,16 @@ class PDF:
         self._base = self._file = None  # garbage collection renumbered the open document
         return data
 
+    def snapshot_key(self, password=''):
+        # Two encrypted copies of the same content differ throughout, so version
+        # history recognises one already stored by the unencrypted content, keyed
+        # with the password. Without a password the snapshot's own bytes serve.
+        if not password:
+            return None
+        from versions import content_key
+        plain = self.doc.tobytes(garbage=4, deflate=True, no_new_id=True, encryption=fitz.PDF_ENCRYPT_NONE)
+        return content_key(plain, password)
+
     def save(self, path, password='', owner_password='', permissions=None):
         data = self.doc.tobytes(**self._save_options(password, owner_password, permissions))
         self._base = self._file = None  # garbage collection renumbered the open document
