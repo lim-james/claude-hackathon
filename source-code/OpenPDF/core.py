@@ -63,7 +63,7 @@ class PDF:
 
     def restore(self, data):
         # data is what bytes() or snapshot() returned.
-        base, tail = data if isinstance(data, tuple) else (data, b'')
+        base, tail = self._parts(data)
         self.doc.close()
         self.doc = fitz.open(stream=base + tail if tail else base, filetype='pdf')
         self._base, self._tail, self._xrefs, self._changed, self._file = base, tail, self.doc.xref_length(), False, None
@@ -87,8 +87,8 @@ class PDF:
                 pass
         tail = self._changes()
         if tail is None:
-            # No usable base (new, encrypted or repaired file, or renumbered by
-            # a garbage-collecting save): take one full copy and continue from it.
+            # No usable base (new, encrypted or repaired file): take one full
+            # copy and continue from it.
             data = self.bytes()
             self.restore(data)
             return data
@@ -180,22 +180,39 @@ class PDF:
                 mask |= flags
         return mask
 
+    def _collected_bytes(self, **options):
+        """A compacted copy (garbage=4, deflate) of the document as it is now.
+
+        Garbage collection renumbers the document it runs on, which would make
+        MuPDF's change record and the undo base unusable (#133, #138), so it runs
+        on a throwaway copy opened from snapshot(): the open document, its undo
+        base and its thumbnails stay as they are.
+        """
+        base, tail = self._parts(self.snapshot())
+        work = fitz.open(stream=base + tail if tail else base, filetype='pdf')
+        try:
+            return work.tobytes(garbage=4, deflate=True, **options)
+        finally:
+            work.close()
+
+    @staticmethod
+    def _parts(step):
+        return step if isinstance(step, tuple) else (step, b'')
+
     def snapshot_bytes(self):
         # A copy that is kept on disk (version history).
-        data = self.doc.tobytes(garbage=4, deflate=True)
-        self._base = self._file = None  # garbage collection renumbered the open document
-        return data
+        return self._collected_bytes()
 
     def save(self, path, password='', owner_password='', permissions=None):
-        options = dict(garbage=4, deflate=True)
+        options = {}
         if password:
             if permissions is None:  # no restrictions chosen: grant everything
                 permissions = self.permission_mask(key for key, _label, _flags in self.PERMISSIONS)
             options.update(encryption=fitz.PDF_ENCRYPT_AES_256,
                            user_pw=password, owner_pw=owner_password or password,
                            permissions=permissions)
-        data = self.doc.tobytes(**options)
-        self._base = self._file = None  # garbage collection renumbered the open document
+        # Copied before the write: saving over the opened file must not change the undo base it reads.
+        data = self._collected_bytes(**options)
         self._atomic_write(path, data)
 
     @staticmethod
@@ -212,9 +229,7 @@ class PDF:
                 os.unlink(tmp)
 
     def current_size(self):
-        data = self.doc.tobytes(garbage=4, deflate=True)
-        self._base = self._file = None  # garbage collection renumbered the open document
-        return len(data)
+        return len(self._collected_bytes())
 
     def optimized_bytes(self, dpi=120, quality=70, downsample_images=True,
                         subset_fonts=True, strip_metadata=False):
