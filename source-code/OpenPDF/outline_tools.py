@@ -40,10 +40,20 @@ def _last_top_item(doc, root):
     return 0
 
 
+def _page_to_pdf(page):
+    """Matrix from the page as shown (rotated, cropped, top-left origin) to PDF
+    space. It is MuPDF's own page transform, the one rendering uses;
+    ``page.transformation_matrix`` drops the crop box offset on rotated pages.
+    """
+    ctm = fitz.mupdf.FzMatrix()
+    fitz.mupdf.pdf_page_transform(fitz.mupdf.pdf_page_from_fz_page(page.this), fitz.mupdf.FzRect(), ctm)
+    return ~fitz.Matrix(ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f)
+
+
 def _destination(doc, page_number, point):
     """GoTo action for a point measured from the top-left of the page as shown."""
     page = doc[page_number]
-    target = fitz.Point(point) * page.derotation_matrix * ~page.transformation_matrix
+    target = fitz.Point(point) * _page_to_pdf(page)
     return f'/A<</S/GoTo/D[{page.xref} 0 R/XYZ {target.x:g} {target.y:g} 0]>>'
 
 

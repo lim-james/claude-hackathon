@@ -1,3 +1,4 @@
+import itertools
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,20 @@ def outline(doc):
     """Level, title, page and the destination fields of every bookmark."""
     return [(level, title, page, {k: dest[k] for k in FIELDS if k in dest})
             for level, title, page, dest in doc.get_toc(simple=False)]
+
+
+def shown_at(doc, x, y):
+    """Where a mark painted at PDF point (x, y) appears on page 1 as rendered."""
+    contents = doc.get_new_xref()
+    doc.update_object(contents, '<<>>')
+    doc.update_stream(contents, f'0 g {x - 2:g} {y - 2:g} 4 4 re f'.encode())
+    doc.xref_set_key(doc[0].xref, 'Contents', f'{contents} 0 R')
+    pix = doc[0].get_pixmap(alpha=False, colorspace=fitz.csGRAY)
+    dark = [i for i, value in enumerate(pix.samples) if value < 128]
+    if not dark:
+        return None  # off the visible page
+    return (round(sum(i % pix.width for i in dark) / len(dark) + 0.5),
+            round(sum(i // pix.width for i in dark) / len(dark) + 0.5))
 
 
 def stored(doc):
@@ -86,6 +101,26 @@ class BookmarkTests(unittest.TestCase):
         self.assertEqual([entry[3]['to'] for entry in after[3::2]], [fitz.Point(72, 36)] * 3)
         self.assertEqual([entry[3]['to'] for entry in after[4::2]], [fitz.Point(100, 200)] * 3)
         self.assertEqual([entry[2] for entry in after[3:]], [1, 1, 2, 2, 3, 3])
+
+    def test_destination_is_on_the_visible_page_for_every_rotation_and_box(self):
+        # Media box at the origin or offset; crop box absent, at the origin or
+        # offset; each under every rotation. A mark painted at the stored /XYZ
+        # point must render at the point asked for, measured on the shown page.
+        boxes = [('[0 0 595 842]', None), ('[0 0 595 842]', '[0 0 500 700]'),
+                 ('[0 0 595 842]', '[50 50 500 700]'), ('[0 100 595 942]', None),
+                 ('[0 100 595 942]', '[50 150 500 800]')]
+        for (media, crop), rotation, point in itertools.product(boxes, (0, 90, 180, 270), (None, (100, 200))):
+            with self.subTest(media=media, crop=crop, rotation=rotation, point=point):
+                doc = fitz.open()
+                page = doc.new_page()
+                doc.xref_set_key(page.xref, 'MediaBox', media)
+                if crop:
+                    doc.xref_set_key(page.xref, 'CropBox', crop)
+                doc.xref_set_key(page.xref, 'Rotate', str(rotation))
+                append_bookmarks(doc, [[1, 'New', 1] + ([point] if point else [])])
+                action = doc.xref_get_key(doc.get_outline_xrefs()[0], 'A/D')[1]
+                x, y = (float(v) for v in action.split('/XYZ')[1].split()[:2])
+                self.assertEqual(shown_at(doc, x, y), point or (72, 36))
 
     def test_nested_entries_follow_their_appended_parent(self):
         self.styled_outline()
