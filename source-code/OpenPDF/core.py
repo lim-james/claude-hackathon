@@ -180,6 +180,12 @@ class PDF:
                 mask |= flags
         return mask
 
+    def snapshot_bytes(self):
+        # A copy that is kept on disk (version history).
+        data = self.doc.tobytes(garbage=4, deflate=True)
+        self._base = self._file = None  # garbage collection renumbered the open document
+        return data
+
     def save(self, path, password='', owner_password='', permissions=None):
         options = dict(garbage=4, deflate=True)
         if password:

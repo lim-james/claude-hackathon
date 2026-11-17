@@ -1,11 +1,16 @@
 """Undo steps: each must give back exactly the earlier document, and cost what the edit changed."""
 import io
+import os
+import re
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 import fitz
 from PIL import Image
 from core import PDF
+import versions
 
 
 def noise_jpeg(size=(600, 800)):
@@ -74,6 +79,9 @@ class HistoryTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.image = self.root / 'image.jpg'
         self.image.write_bytes(noise_jpeg((200, 200)))
+        history = mock.patch.dict(os.environ, {'OPENPDF_HISTORY_DIR': str(self.root / 'history')})
+        history.start()
+        self.addCleanup(history.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -248,6 +256,106 @@ class HistoryTests(unittest.TestCase):
         pdf.save(output)
         for form in secret:
             self.assertIn(form, saved_content(output))
+
+    def saved_once(self):
+        """A file OpenPDF has already saved: garbage collection finds nothing to drop in it,
+        so a renumbering copy keeps the object count (a fresh file hides issue #133)."""
+        doc = fitz.open()
+        for number in range(10):
+            doc.new_page().insert_text((72, 72), f'Page {number + 1} text')
+        fresh = self.root / 'fresh.pdf'
+        doc.save(fresh)
+        doc.close()
+        pdf = PDF(fresh)
+        pdf.save(self.root / 'saved.pdf')
+        pdf.close()
+        return self.root / 'saved.pdf'
+
+    def test_undo_after_save_version_keeps_earlier_edits(self):
+        # Issue #133, from #58: Save version copied the document with garbage
+        # collection but kept the undo base, so one undo went back to the opened file.
+        pdf = PDF(self.saved_once())
+        self.addCleanup(pdf.close)
+        session = Session(pdf)
+        session.change(lambda: pdf.insert_text(0, (60, 200, 400, 245), 'EDIT-ONE'))
+        one = state(pdf.doc)
+        versions.save_version(self.root / 'saved.pdf', pdf.snapshot_bytes(), 'v1')
+        session.change(lambda: pdf.insert_text(1, (60, 200, 400, 245), 'EDIT-TWO'))
+        two = state(pdf.doc)
+        session.undo()
+        self.assertIn('EDIT-ONE', pdf.doc[0].get_text())
+        self.assertNotIn('EDIT-TWO', pdf.doc[1].get_text())
+        self.assertEqual(state(pdf.doc), one)
+        self.assertEqual(len(session.history), 1)
+        session.redo()
+        self.assertEqual(state(pdf.doc), two)
+
+    def test_undo_after_other_copies_of_the_open_document(self):
+        # The other paths that write the open document without an undo step.
+        paths = {
+            'Save as': lambda pdf: pdf.save(self.root / 'out.pdf'),
+            'Password export': lambda pdf: pdf.save(self.root / 'locked.pdf', 'pw', owner_password='owner',
+                                                    permissions=0),
+            'Optimize estimate': lambda pdf: pdf.current_size(),
+            'Optimize preview': lambda pdf: pdf.optimized_bytes(),
+            'Optimize': lambda pdf: pdf.optimize(self.root / 'small.pdf'),
+        }
+        source = self.saved_once()
+        for name, copy in paths.items():
+            with self.subTest(name):
+                pdf = PDF(source)
+                self.addCleanup(pdf.close)
+                session = Session(pdf)
+                session.change(lambda: pdf.insert_text(0, (60, 200, 400, 245), 'EDIT-ONE'))
+                copy(pdf)
+                session.change(lambda: pdf.insert_text(1, (60, 200, 400, 245), 'EDIT-TWO'))
+                session.undo()
+                self.assertIn('EDIT-ONE', pdf.doc[0].get_text())
+                self.assertNotIn('EDIT-TWO', pdf.doc[1].get_text())
+
+    def restore_version(self, pdf, session, path, version_id):
+        """App._restore_version itself, on the session's history."""
+        app = types.SimpleNamespace(path=path, pdf=pdf, history=session.history,
+                                    redo_history=session.redo_history, dirty=False,
+                                    refresh=lambda: None, status=mock.Mock())
+        from app import App
+        try:
+            App._restore_version(app, version_id)
+        finally:
+            session.history = app.history
+
+    def test_undo_after_restore_version(self):
+        path = self.saved_once()
+        pdf = PDF(path)
+        self.addCleanup(pdf.close)
+        session = Session(pdf)
+        old = versions.save_version(path, pdf.snapshot_bytes(), 'opened')
+        session.change(lambda: pdf.insert_text(0, (60, 200, 400, 245), 'EDIT-ONE'))
+        one = state(pdf.doc)
+        # A restore that fails after the "Before restore" copy leaves the document as it was.
+        with self.assertRaises(ValueError):
+            self.restore_version(pdf, session, path, 'missing')
+        session.change(lambda: pdf.insert_text(1, (60, 200, 400, 245), 'EDIT-TWO'))
+        two = state(pdf.doc)
+        session.undo()
+        self.assertIn('EDIT-ONE', pdf.doc[0].get_text())
+        self.assertEqual(state(pdf.doc), one)
+        session.redo()
+        # A restore that succeeds: one undo gives back the state before it, the next the state before that.
+        self.restore_version(pdf, session, path, old['id'])
+        self.assertNotIn('EDIT-ONE', pdf.doc[0].get_text())
+        session.undo()
+        self.assertIn('EDIT-TWO', pdf.doc[1].get_text())
+        self.assertEqual(state(pdf.doc), two)
+        session.undo()
+        self.assertIn('EDIT-ONE', pdf.doc[0].get_text())
+        self.assertEqual(state(pdf.doc), one)
+
+    def test_app_copies_the_open_document_only_through_pdf_methods(self):
+        # A garbage-collecting copy renumbers the open document; only PDF methods
+        # also reset the undo base (issue #133).
+        source = (Path(__file__).parent.parent / 'app.py').read_text(encoding='utf-8')
+        self.assertEqual(re.findall(r'\.doc\.tobytes\([^)]*garbage', source), [])
 
     def test_history_costs_what_the_edits_changed(self):
         # Issue #44: every step used to hold a full copy, 8 copies of a scan after 8 edits.

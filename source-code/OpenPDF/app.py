@@ -1126,7 +1126,7 @@ class App(tk.Tk):
     def _restore_version(self, version_id):
         # Snapshot the current state first, and record an in-memory undo step, so
         # a restore can be reversed.
-        save_version(self.path, self.pdf.doc.tobytes(garbage=4, deflate=True), 'Before restore')
+        save_version(self.path, self.pdf.snapshot_bytes(), 'Before restore')
         data = read_version(self.path, version_id)
         self.history.append(self.pdf.bytes())
         self.history = self.history[-8:]
@@ -1170,7 +1170,7 @@ class App(tk.Tk):
                 raise ValueError('Select a version in the list first.')
             return item
         def save():
-            save_version(self.path, self.pdf.doc.tobytes(garbage=4, deflate=True), label.get())
+            save_version(self.path, self.pdf.snapshot_bytes(), label.get())
             label.set('')
             reload()
             self.status.set('Version saved.')
