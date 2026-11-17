@@ -193,7 +193,7 @@ class InlineEditor:
             self.close()
             app.render()
             return
-        before = app.pdf.bytes()
+        before = app.pdf.snapshot()
         try:
             edit_section(app.pdf.doc, self.index, self.section, text, self.rect,
                          current_sections=app.native_sections())

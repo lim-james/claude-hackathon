@@ -155,6 +155,7 @@ class App(tk.Tk):
             self.pdf.close()
         self.pdf = PDF()
         self.pdf.doc.new_page()
+        self.pdf.restore(self.pdf.bytes())  # gives undo a base now, so the first edit does not reopen the document
         self.path, self.history, self.redo_history, self.index, self.dirty = None, [], [], 0, True
         self.search_query = ''
         self.refresh()
@@ -174,7 +175,7 @@ class App(tk.Tk):
 
     def change(self, operation, message='Updated document. Save as to export.', dirty_pages=None):
         self.require()
-        before = self.pdf.bytes()
+        before = self.pdf.snapshot()
         try:
             operation()
         except Exception:
@@ -190,14 +191,14 @@ class App(tk.Tk):
 
     def undo(self):
         if self.history:
-            self.redo_history.append(self.pdf.bytes())
+            self.redo_history.append(self.pdf.snapshot())
             self.pdf.restore(self.history.pop())
             self.dirty = True
             self.refresh()
 
     def redo(self):
         if self.redo_history:
-            self.history.append(self.pdf.bytes())
+            self.history.append(self.pdf.snapshot())
             self.history = self.history[-8:]
             self.pdf.restore(self.redo_history.pop())
             self.dirty = True
