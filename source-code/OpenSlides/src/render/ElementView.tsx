@@ -6,6 +6,7 @@ import { shapePath } from './shapes';
 import { ChartView } from './ChartView';
 import { rememberSelection, sanitizeHtml } from './richtext';
 import type { BuildInfo } from './builds';
+import { xmlSafe } from '../io/xmlText';
 
 export type RenderMode = 'edit' | 'thumb' | 'present' | 'export';
 
@@ -17,6 +18,7 @@ export interface AnimState {
 
 export interface ElementViewProps {
   el: SlideElement;
+  /** Fields read from it here must also be listed in thumbEqual (editor/thumbEqual.ts). */
   deck: Deck;
   mode: RenderMode;
   tokens: TokenContext;
@@ -91,8 +93,8 @@ function TextEditable({ el, theme, listDefault, onCommit, onMeasure }: { el: Tex
         if (onMeasure && ref.current) onMeasure(ref.current.offsetHeight);
       }}
       onPaste={(e) => {
-        // Keep pasted text clean: plain text only, line breaks preserved.
-        const text = e.clipboardData.getData('text/plain');
+        // Keep pasted text clean: plain text only, line breaks preserved, nothing a .pptx cannot carry.
+        const text = xmlSafe(e.clipboardData.getData('text/plain'));
         if (text) {
           e.preventDefault();
           document.execCommand('insertText', false, text);

@@ -24,6 +24,8 @@ export interface SlideViewProps {
   children?: ReactNode;
 }
 
+// When this or ElementView reads another field of `deck`, add it to thumbEqual (editor/thumbEqual.ts),
+// or slide-panel thumbnails will not update when that field changes.
 function SlideViewInner(props: SlideViewProps) {
   const { deck, slide, mode, scale, index, step = Infinity, animateStep = null, editingId } = props;
   const W = deck.size.w;

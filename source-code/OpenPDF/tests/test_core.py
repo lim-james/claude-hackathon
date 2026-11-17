@@ -91,6 +91,43 @@ class PDFTests(unittest.TestCase):
         self.assertTrue((self.root / 'page-0001.png').exists())
         self.assertIsNotNone(self.pdf.doc[0].first_annot)
 
+    def test_page_numbers_stay_bottom_centre_on_rotated_pages(self):
+        # Issue #35: the number was drawn sideways in the body of a rotated page.
+        from PIL import ImageChops
+
+        def ink(page):  # (offset from the page centre, distance to the bottom, width, height)
+            pix = page.get_pixmap(dpi=72, alpha=False)
+            image = Image.frombytes('RGB', (pix.width, pix.height), pix.samples)
+            box = ImageChops.difference(image, Image.new('RGB', image.size, (255, 255, 255))).getbbox()
+            self.assertIsNotNone(box, f'no page number on a page rotated {page.rotation}')
+            return ((box[0] + box[2]) / 2 - pix.width / 2, pix.height - box[3],
+                    box[2] - box[0], box[3] - box[1])
+
+        pdf = PDF()
+        try:
+            for rotation in (0, 90, 180, 270):
+                pdf.doc.new_page().set_rotation(rotation)
+            pdf.number_pages()
+            pdf.restore(pdf.bytes())
+            # "1 / 4" .. "4 / 4" differ in their first digit, so compare each page with
+            # the same label on an unrotated page.
+            for index, rotation in enumerate((0, 90, 180, 270)):
+                plain = PDF()
+                try:
+                    for _ in range(4):
+                        plain.doc.new_page()
+                    plain.number_pages()
+                    want = ink(plain.doc[index])
+                finally:
+                    plain.close()
+                got = ink(pdf.doc[index])
+                self.assertAlmostEqual(got[0], want[0], delta=2, msg=f'{rotation}: not centred')
+                self.assertAlmostEqual(got[1], 19, delta=2, msg=f'{rotation}: bottom')
+                self.assertAlmostEqual(got[2], want[2], delta=1, msg=f'{rotation}: width')
+                self.assertAlmostEqual(got[3], want[3], delta=1, msg=f'{rotation}: height')
+        finally:
+            pdf.close()
+
     def test_image_pdf_and_comparison(self):
         image = self.root / 'image.png'
         Image.new('RGB', (200, 100), 'red').save(image)

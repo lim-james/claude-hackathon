@@ -42,6 +42,16 @@ class PDF:
             data = self.doc.convert_to_pdf()
             self.doc.close()
             self.doc = fitz.open(stream=data, filetype='pdf')
+        # Undo bookkeeping, see snapshot(). A plain PDF file is its own base,
+        # read on the first edit; anything else gets one when it is first copied.
+        self._base, self._tail, self._xrefs, self._changed, self._file = None, b'', 0, False, None
+        if path and self.doc.name:
+            self._file = (path, self._signature(path))
+
+    @staticmethod
+    def _signature(path):
+        stat = os.stat(path)
+        return stat.st_ino, stat.st_size, stat.st_mtime_ns
 
     def close(self):
         self.doc.close()
@@ -52,8 +62,104 @@ class PDF:
         return self.doc.tobytes(garbage=0, deflate=False)
 
     def restore(self, data):
+        # data is what bytes() or snapshot() returned.
+        base, tail = data if isinstance(data, tuple) else (data, b'')
         self.doc.close()
-        self.doc = fitz.open(stream=data, filetype='pdf')
+        self.doc = fitz.open(stream=base + tail if tail else base, filetype='pdf')
+        self._base, self._tail, self._xrefs, self._changed, self._file = base, tail, self.doc.xref_length(), False, None
+
+    def snapshot(self):
+        """The document as it is now, for restore(): an undo step.
+
+        A full copy costs time and memory in proportion to the file, so a step
+        is stored as (base, tail): base is one full copy shared by every step,
+        tail holds only the objects changed since, written as a PDF incremental
+        update. base + tail is a complete PDF.
+        """
+        if self._file:
+            path, signature = self._file
+            self._file = None
+            try:
+                data = Path(path).read_bytes()
+                if self._signature(path) == signature and len(data) == signature[1]:
+                    self._base = data
+            except OSError:
+                pass
+        tail = self._changes()
+        if tail is None:
+            # No usable base (new, encrypted or repaired file, or renumbered by
+            # a garbage-collecting save): take one full copy and continue from it.
+            data = self.bytes()
+            self.restore(data)
+            return data
+        return (self._base, self._tail + tail)
+
+    def _changes(self):
+        """Objects changed since the document was opened, as an incremental update; None if unknown."""
+        try:
+            tail = self._incremental_update()
+        except Exception:
+            tail = None
+        if tail is None:
+            self._base = None
+        return tail
+
+    def _incremental_update(self):
+        mu, pdf = fitz.mupdf, fitz._as_pdf_document(self.doc)
+        state = pdf.m_internal
+        count, changed = mu.pdf_xref_len(pdf), bool(state.num_incremental_sections)
+        # MuPDF records every changed object in an incremental section, the way
+        # it does for its own incremental save. That record is unusable once
+        # objects were renumbered, or when the file needed repair or decryption
+        # or does not start at its header.
+        if (self._base is None or count < self._xrefs or self._changed > changed
+                or state.repair_attempted or state.crypt or state.bias):
+            return None
+        self._xrefs, self._changed = count, changed
+        if not changed:
+            return b''
+
+        def source(obj):
+            buffer = mu.fz_new_buffer(512)
+            out = mu.FzOutput(buffer)
+            mu.pdf_print_obj(out, obj, 1, 1)
+            out.fz_close_output()
+            return mu.fz_buffer_extract_copy(buffer)
+
+        out, offsets = [b'\n'], {}
+        position = len(self._base) + len(self._tail) + 1
+        for xref in range(1, count):
+            if not mu.pdf_xref_is_incremental(pdf, xref):
+                continue
+            obj = mu.pdf_load_object(pdf, xref)
+            parts = [b'%d 0 obj\n' % xref, source(obj)]
+            if mu.pdf_obj_num_is_stream(pdf, xref):
+                raw = mu.fz_buffer_extract_copy(mu.pdf_load_raw_stream_number(pdf, xref))
+                if mu.pdf_to_int(mu.pdf_dict_gets(obj, 'Length')) != len(raw):
+                    return None
+                parts += [b'\nstream\n', raw, b'\nendstream']
+            parts.append(b'\nendobj\n')
+            offsets[xref] = position
+            position += sum(map(len, parts))
+            out += parts
+        out.append(b'xref\n')
+        numbers = sorted(offsets)
+        start = 0
+        while start < len(numbers):
+            end = start
+            while end + 1 < len(numbers) and numbers[end + 1] == numbers[end] + 1:
+                end += 1
+            out.append(b'%d %d\n' % (numbers[start], end - start + 1))
+            out += [b'%010d 00000 n \n' % offsets[n] for n in numbers[start:end + 1]]
+            start = end + 1
+        out.append(b'trailer\n<</Size %d/Prev %d' % (count, state.startxref))
+        trailer = mu.pdf_trailer(pdf)
+        for key in ('Root', 'Info', 'ID'):
+            value = mu.pdf_dict_gets(trailer, key)
+            if value.m_internal and not mu.pdf_is_null(value):
+                out.append(b'/%s %s' % (key.encode(), source(value)))
+        out.append(b'>>\nstartxref\n%d\n%%%%EOF\n' % position)
+        return b''.join(out)
 
     # User-facing permission groups; each maps to the low-level PDF_PERM_* flags
     # that a password-protected export grants to whoever opens with the password.
@@ -82,7 +188,9 @@ class PDF:
             options.update(encryption=fitz.PDF_ENCRYPT_AES_256,
                            user_pw=password, owner_pw=owner_password or password,
                            permissions=permissions)
-        self._atomic_write(path, self.doc.tobytes(**options))
+        data = self.doc.tobytes(**options)
+        self._base = self._file = None  # garbage collection renumbered the open document
+        self._atomic_write(path, data)
 
     @staticmethod
     def _atomic_write(path, data):
@@ -98,7 +206,9 @@ class PDF:
                 os.unlink(tmp)
 
     def current_size(self):
-        return len(self.doc.tobytes(garbage=4, deflate=True))
+        data = self.doc.tobytes(garbage=4, deflate=True)
+        self._base = self._file = None  # garbage collection renumbered the open document
+        return len(data)
 
     def optimized_bytes(self, dpi=120, quality=70, downsample_images=True,
                         subset_fonts=True, strip_metadata=False):
@@ -389,9 +499,15 @@ class PDF:
         from watermark_tools import add_watermarks
         add_watermarks(self.doc, text, **options)
 
+    @staticmethod
+    def _stamp_text(page, point, text, **options):
+        # point is in displayed (rotated) page coordinates; insert_text works in unrotated space.
+        page.insert_text(fitz.Point(point) * page.derotation_matrix, text,
+                         rotate=page.rotation, **options)
+
     def number_pages(self):
         for i, page in enumerate(self.doc):
-            page.insert_text((page.rect.width / 2, page.rect.height - 20),
+            self._stamp_text(page, (page.rect.width / 2, page.rect.height - 20),
                              f'{i + 1} / {len(self.doc)}', fontsize=10)
 
     # Header/footer slots; templates may contain <page> <pages> <date> <filename>.
@@ -413,7 +529,7 @@ class PDF:
         else:
             x = (page.rect.width - width) / 2
         y = margin if band in ('header', 'top') else page.rect.height - margin
-        page.insert_text((x, y), text, fontsize=size, fontname=font, color=color)
+        self._stamp_text(page, (x, y), text, fontsize=size, fontname=font, color=color)
 
     def apply_header_footer(self, slots, filename='', size=10, color=(0, 0, 0),
                             font='helv', margin=36, first=None, last=None):

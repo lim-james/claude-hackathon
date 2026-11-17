@@ -3,6 +3,7 @@ import { useEditor } from '../store/editor';
 import type { Deck, Slide, SlideElement, TextElement } from '../model/types';
 import { aabb, getLayout, htmlToText, placeholderKind, resolveElement, slideBackground } from '../model/resolve';
 import { backgroundColor, contrastRatio, resolveColor, resolveFont, toHex } from '../model/theme';
+import { textPt } from '../model/units';
 
 export type Severity = 'error' | 'warning' | 'tip';
 export type FixKind = 'offslide' | 'alt' | 'contrast' | 'none';
@@ -17,9 +18,9 @@ export interface Issue {
   fix: FixKind;
 }
 
-/** Converts slide pixels to the point size the text will have in PowerPoint (13.33in wide slide). */
+/** Converts slide pixels to the point size the text will have in PowerPoint (the slide's longer side is 13.33in). */
 export function pxToPt(px: number, deck: Deck): number {
-  return (px * 960) / deck.size.w;
+  return textPt(px, deck.size);
 }
 
 /** The colour actually behind a text box: its own fill, a shape under it, or the slide background. */
