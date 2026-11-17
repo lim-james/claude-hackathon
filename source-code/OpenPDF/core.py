@@ -32,6 +32,95 @@ def page_numbers(spec, count):
     return result
 
 
+def _ref(doc, xref, key):
+    kind, value = doc.xref_get_key(xref, key)
+    return int(value.split()[0]) if kind == 'xref' else 0
+
+
+def _bookmarks_to(doc, page_xrefs):
+    """Xrefs of the bookmarks that open one of these pages, parents before
+    children. Read with MuPDF's object calls: ``get_toc`` costs about as much
+    as removing a page from a long document."""
+    mu = fitz.mupdf
+    pdf = fitz._as_pdf_document(doc)
+
+    def page_of(item):
+        dest = mu.pdf_dict_gets(item, 'Dest')
+        if not dest.m_internal:
+            action = mu.pdf_dict_gets(item, 'A')
+            if mu.pdf_to_name(mu.pdf_dict_gets(action, 'S')) != 'GoTo':
+                return 0
+            dest = mu.pdf_dict_gets(action, 'D')
+        if mu.pdf_is_name(dest) or mu.pdf_is_string(dest):
+            dest = mu.pdf_lookup_dest(pdf, dest)
+        if mu.pdf_is_dict(dest):
+            dest = mu.pdf_dict_gets(dest, 'D')
+        page = mu.pdf_array_get(dest, 0) if mu.pdf_is_array(dest) else None
+        return mu.pdf_to_num(page) if page is not None and mu.pdf_is_indirect(page) else 0
+
+    found, seen = [], set()
+    stack = [mu.pdf_dict_gets(mu.pdf_dict_getp(mu.pdf_trailer(pdf), 'Root/Outlines'), 'First')]
+    while stack:
+        item = stack.pop()
+        while mu.pdf_is_dict(item) and mu.pdf_to_num(item) not in seen:
+            seen.add(mu.pdf_to_num(item))
+            if page_of(item) in page_xrefs:
+                found.append(mu.pdf_to_num(item))
+            stack.append(mu.pdf_dict_gets(item, 'Next'))
+            item = mu.pdf_dict_gets(item, 'First')
+    return found
+
+
+def _unlink_bookmark(doc, xref):
+    """Take an outline item out of its list; its children, if any, take its place."""
+    parent, prev, following = (_ref(doc, xref, key) for key in ('Parent', 'Prev', 'Next'))
+    first, last = _ref(doc, xref, 'First'), _ref(doc, xref, 'Last')
+    if first and last:
+        child = first
+        while child:
+            doc.xref_set_key(child, 'Parent', f'{parent} 0 R')
+            child = _ref(doc, child, 'Next') if child != last else 0
+        start, end = first, last
+    else:
+        start, end = following, prev
+    for owner, key, value in ((start, 'Prev', prev), (end, 'Next', following)):
+        if owner:
+            doc.xref_set_key(owner, key, f'{value} 0 R' if value else 'null')
+    for neighbour, key, value in ((prev, 'Next', start), (following, 'Prev', end)):
+        if neighbour:
+            doc.xref_set_key(neighbour, key, f'{value} 0 R' if value else 'null')
+    if parent:
+        if not prev:
+            doc.xref_set_key(parent, 'First', f'{start} 0 R' if start else 'null')
+        if not following:
+            doc.xref_set_key(parent, 'Last', f'{end} 0 R' if end else 'null')
+    for key in ('Parent', 'Prev', 'Next', 'First', 'Last'):
+        doc.xref_set_key(xref, key, 'null')
+
+
+def _recount(doc, xref, seen=None, is_root=True):
+    """Rewrite /Count below ``xref``; return how many items it shows when open."""
+    seen = set() if seen is None else seen
+    if not xref or xref in seen:
+        return 0
+    seen.add(xref)
+    shown, child = 0, _ref(doc, xref, 'First')
+    while child and child not in seen:
+        kind, value = doc.xref_get_key(child, 'Count')
+        is_open = not (kind == 'int' and int(value) < 0)
+        below = _recount(doc, child, seen, False)
+        shown += 1 + (below if is_open else 0)
+        child = _ref(doc, child, 'Next')
+    kind, value = doc.xref_get_key(xref, 'Count')
+    if not shown and not is_root:
+        doc.xref_set_key(xref, 'Count', 'null')
+    elif is_root or not (kind == 'int' and int(value) < 0):
+        doc.xref_set_key(xref, 'Count', str(shown))
+    else:
+        doc.xref_set_key(xref, 'Count', str(-shown))
+    return shown
+
+
 class PDF:
     def __init__(self, path=None, password=''):
         self.doc = fitz.open(path) if path else fitz.open()
@@ -246,7 +335,27 @@ class PDF:
                 source.close()
 
     def select(self, spec):
-        self.doc.select(page_numbers(spec, len(self.doc)))
+        self.keep_pages(page_numbers(spec, len(self.doc)))
+
+    def delete_page(self, index):
+        self.keep_pages([i for i in range(len(self.doc)) if i != index])
+
+    def keep_pages(self, pages):
+        """Keep these 0-based pages in this order, and the bookmarks that still open one.
+
+        A bookmark to a removed page is taken out and its children take its
+        place, so none is left opening nothing and none to a kept page is lost.
+        ``doc.delete_page`` keeps them all; ``doc.select`` keeps a parent with
+        surviving children, opening nothing, and loses grandchildren.
+        """
+        kept = set(pages)
+        removed = {self.doc.page_xref(i) for i in range(len(self.doc)) if i not in kept}
+        dead = _bookmarks_to(self.doc, removed)
+        for xref in dead:
+            _unlink_bookmark(self.doc, xref)
+        if dead:
+            _recount(self.doc, _ref(self.doc, self.doc.pdf_catalog(), 'Outlines'))
+        self.doc.select(pages)
 
     def split(self, folder):
         for index in range(len(self.doc)):

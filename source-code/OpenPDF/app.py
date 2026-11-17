@@ -534,7 +534,7 @@ class App(tk.Tk):
         self.require()
         if len(self.pdf.doc) == 1:
             raise ValueError('Keep at least one page.')
-        self.change(lambda: self.pdf.doc.delete_page(self.index))
+        self.change(lambda: self.pdf.delete_page(self.index))
 
     def blank(self):
         self.change(lambda: self.pdf.doc.new_page(pno=self.index + 1))

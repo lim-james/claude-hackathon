@@ -164,6 +164,207 @@ class PDFTests(unittest.TestCase):
         self.assertNotIn('123456', self.pdf.doc[0].get_text())
 
 
+class DeletePageBookmarkTests(unittest.TestCase):
+    """Delete page and Extract / reorder keep only bookmarks that still open something."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        doc = fitz.open()
+        for number in range(1, 5):
+            doc.new_page().insert_text((72, 72), f'Chapter {number}', fontsize=20)
+        doc.set_toc([
+            [1, 'Contents', -1],
+            [1, 'Intro', 1, {'kind': fitz.LINK_GOTO, 'page': 0, 'to': fitz.Point(72, 500), 'zoom': 2.0}],
+            [2, 'Intro detail', 2],
+            [1, 'Method', 2],
+            [2, 'Method detail', 2],
+            [2, 'Method results', 3],
+            [1, 'Results', 3, {'kind': fitz.LINK_GOTO, 'page': 2, 'to': fitz.Point(72, 400), 'zoom': 3.0,
+                               'color': (1, 0, 0), 'bold': True}],
+            [1, 'Site', -1, {'kind': fitz.LINK_URI, 'uri': 'https://example.com'}],
+            [1, 'End', 4],
+        ])
+        self.path = self.root / 'four.pdf'
+        doc.save(self.path)
+        doc.close()
+        self.pdf = PDF(str(self.path))
+
+    def tearDown(self):
+        self.pdf.close()
+        self.tmp.cleanup()
+
+    @staticmethod
+    def outline(doc):
+        """(level, title, page, what it opens and how it looks) per bookmark."""
+        keep = ('kind', 'to', 'zoom', 'uri', 'color', 'bold')
+        return [(level, title, page, {k: v for k, v in info.items() if k in keep})
+                for level, title, page, info in doc.get_toc(simple=False)]
+
+    def reopened(self):
+        out = self.root / 'out.pdf'
+        self.pdf.save(out)
+        with fitz.open(out) as doc:
+            return self.outline(doc), self.links_are_consistent(doc)
+
+    @staticmethod
+    def links_are_consistent(doc):
+        """Every /First, /Last, /Prev, /Next, /Parent and /Count agrees with the others."""
+        def ref(xref, key):
+            kind, value = doc.xref_get_key(xref, key)
+            return int(value.split()[0]) if kind == 'xref' else 0
+
+        def walk(parent):
+            children, child = [], ref(parent, 'First')
+            while child:
+                children.append(child)
+                child = ref(child, 'Next')
+            if not children:
+                return (ref(parent, 'Last') == 0, 0)
+            ok = (ref(parent, 'Last') == children[-1] and ref(children[0], 'Prev') == 0
+                  and all(ref(c, 'Parent') == parent for c in children)
+                  and all(ref(b, 'Prev') == a for a, b in zip(children, children[1:])))
+            shown = 0
+            for c in children:
+                c_ok, below = walk(c)
+                kind, value = doc.xref_get_key(c, 'Count')
+                count = int(value) if kind == 'int' else 0
+                ok = ok and c_ok and abs(count) == below
+                shown += 1 + (below if count > 0 else 0)
+            return ok, shown
+
+        root = ref(doc.pdf_catalog(), 'Outlines')
+        if not root:
+            return True
+        ok, shown = walk(root)
+        return ok and doc.xref_get_key(root, 'Count')[1] == str(shown)
+
+    def titles(self, outline):
+        return [(level, title, page) for level, title, page, _ in outline]
+
+    def test_issue_file_loses_the_deleted_pages_bookmark(self):
+        doc = fitz.open()
+        for number in range(3):
+            doc.new_page()
+        doc.set_toc([[1, 'Intro', 1], [1, 'Method', 2], [1, 'Results', 3]])
+        doc.save(self.root / 'three.pdf')
+        doc.close()
+        self.pdf.close()
+        self.pdf = PDF(str(self.root / 'three.pdf'))
+        self.pdf.delete_page(1)
+        self.assertEqual(self.pdf.doc.get_toc(), [[1, 'Intro', 1], [1, 'Results', 2]])
+        outline, consistent = self.reopened()
+        self.assertEqual(self.titles(outline), [(1, 'Intro', 1), (1, 'Results', 2)])
+        self.assertTrue(consistent)
+
+    def test_delete_keeps_other_bookmarks_and_their_children(self):
+        before = self.outline(self.pdf.doc)
+        self.pdf.delete_page(1)
+        outline, consistent = self.reopened()
+        self.assertTrue(consistent)
+        # Method goes; its child on a kept page takes its place, a child on the
+        # deleted page goes with it, a child of Intro on the deleted page goes.
+        self.assertEqual(self.titles(outline), [
+            (1, 'Contents', -1), (1, 'Intro', 1), (1, 'Method results', 2),
+            (1, 'Results', 2), (1, 'Site', -1), (1, 'End', 3)])
+        by_title = {entry[1]: entry[3] for entry in before}
+        for level, title, page, info in outline:
+            self.assertEqual(info, by_title[title], title)  # position, zoom, colour, bold, web link
+
+    def test_delete_several_pages_in_a_row(self):
+        for index in (1, 0, 1):
+            self.pdf.delete_page(index)
+        self.assertEqual(len(self.pdf.doc), 1)
+        outline, consistent = self.reopened()
+        self.assertTrue(consistent)
+        self.assertEqual(self.titles(outline), [
+            (1, 'Contents', -1), (1, 'Method results', 1), (1, 'Results', 1), (1, 'Site', -1)])
+
+    def test_deleting_the_only_bookmarked_page_empties_the_outline(self):
+        doc = fitz.open()
+        doc.new_page()
+        doc.new_page()
+        doc.set_toc([[1, 'Only', 2]])
+        doc.save(self.root / 'two.pdf')
+        doc.close()
+        self.pdf.close()
+        self.pdf = PDF(str(self.root / 'two.pdf'))
+        self.pdf.delete_page(1)
+        outline, consistent = self.reopened()
+        self.assertEqual(outline, [])
+        self.assertTrue(consistent)
+
+    def test_grandchild_on_a_kept_page_survives(self):
+        doc = fitz.open()
+        for number in range(3):
+            doc.new_page()
+        doc.set_toc([[1, 'A', 2], [2, 'B', 2], [3, 'C', 3], [3, 'C2', 2], [1, 'Z', 1]])
+        doc.save(self.root / 'nested.pdf')
+        doc.close()
+        self.pdf.close()
+        self.pdf = PDF(str(self.root / 'nested.pdf'))
+        self.pdf.delete_page(1)
+        outline, consistent = self.reopened()
+        self.assertEqual(self.titles(outline), [(1, 'C', 2), (1, 'Z', 1)])
+        self.assertTrue(consistent)
+
+    def test_named_destination_to_the_deleted_page(self):
+        doc = self.pdf.doc
+        doc.set_toc([[1, 'Intro', 1]])
+        names = doc.get_new_xref()
+        doc.update_object(names, f'<</Names[(method) [{doc.page_xref(1)} 0 R /XYZ 0 0 0]]>>')
+        doc.xref_set_key(doc.pdf_catalog(), 'Names', f'<</Dests {names} 0 R>>')
+        intro = doc.get_toc(simple=False)[0][3]['xref']
+        named = doc.get_new_xref()
+        root = int(doc.xref_get_key(doc.pdf_catalog(), 'Outlines')[1].split()[0])
+        doc.update_object(named, f'<</Title(Method)/Parent {root} 0 R/Prev {intro} 0 R/Dest(method)>>')
+        doc.xref_set_key(intro, 'Next', f'{named} 0 R')
+        doc.xref_set_key(root, 'Last', f'{named} 0 R')
+        doc.xref_set_key(root, 'Count', '2')
+        self.assertEqual(doc.get_toc(), [[1, 'Intro', 1], [1, 'Method', 2]])
+        self.pdf.delete_page(1)
+        outline, consistent = self.reopened()
+        self.assertEqual(self.titles(outline), [(1, 'Intro', 1)])
+        self.assertTrue(consistent)
+
+    def test_undo_and_redo_of_a_delete(self):
+        before = self.outline(self.pdf.doc)
+        step = self.pdf.snapshot()
+        self.pdf.delete_page(1)
+        after = self.outline(self.pdf.doc)
+        redo = self.pdf.snapshot()
+        self.pdf.restore(step)
+        self.assertEqual(len(self.pdf.doc), 4)
+        self.assertEqual(self.outline(self.pdf.doc), before)
+        self.pdf.restore(redo)
+        self.assertEqual(self.outline(self.pdf.doc), after)
+        self.pdf.delete_page(0)  # an edit after redo starts from the redone outline
+        self.assertNotIn('Intro', [entry[1] for entry in self.outline(self.pdf.doc)])
+
+    def test_extract_and_reorder(self):
+        self.pdf.select('4,3,1')
+        outline, consistent = self.reopened()
+        self.assertTrue(consistent)
+        self.assertEqual(self.titles(outline), [
+            (1, 'Contents', -1), (1, 'Intro', 3), (1, 'Method results', 2),
+            (1, 'Results', 2), (1, 'Site', -1), (1, 'End', 1)])
+        self.pdf.close()
+        self.pdf = PDF(str(self.path))
+        self.pdf.select('4,3,2,1')  # reorder only: every bookmark stays where it was
+        self.assertEqual(self.titles(self.outline(self.pdf.doc)), [
+            (1, 'Contents', -1), (1, 'Intro', 4), (2, 'Intro detail', 3), (1, 'Method', 3),
+            (2, 'Method detail', 3), (2, 'Method results', 2), (1, 'Results', 2), (1, 'Site', -1), (1, 'End', 1)])
+
+    def test_split_after_delete(self):
+        self.pdf.delete_page(1)
+        folder = self.root / 'split'
+        folder.mkdir()
+        self.pdf.split(folder)
+        files = sorted(folder.glob('page-*.pdf'))
+        self.assertEqual(len(files), 3)
+        with fitz.open(files[1]) as doc:
+            self.assertIn('Chapter 3', doc[0].get_text())
+
+
 if __name__ == '__main__':
     unittest.main()
-
