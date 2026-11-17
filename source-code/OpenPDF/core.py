@@ -98,27 +98,31 @@ def _unlink_bookmark(doc, xref):
         doc.xref_set_key(xref, key, 'null')
 
 
-def _recount(doc, xref, seen=None, is_root=True):
-    """Rewrite /Count below ``xref``; return how many items it shows when open."""
-    seen = set() if seen is None else seen
-    if not xref or xref in seen:
-        return 0
-    seen.add(xref)
-    shown, child = 0, _ref(doc, xref, 'First')
-    while child and child not in seen:
-        kind, value = doc.xref_get_key(child, 'Count')
-        is_open = not (kind == 'int' and int(value) < 0)
-        below = _recount(doc, child, seen, False)
-        shown += 1 + (below if is_open else 0)
-        child = _ref(doc, child, 'Next')
-    kind, value = doc.xref_get_key(xref, 'Count')
-    if not shown and not is_root:
-        doc.xref_set_key(xref, 'Count', 'null')
-    elif is_root or not (kind == 'int' and int(value) < 0):
-        doc.xref_set_key(xref, 'Count', str(shown))
-    else:
-        doc.xref_set_key(xref, 'Count', str(-shown))
-    return shown
+def _recount(doc, xref):
+    """Rewrite each /Count below outline root ``xref`` that no longer matches its items."""
+    mu = fitz.mupdf
+    pdf = fitz._as_pdf_document(doc)
+    seen = set()
+
+    def visit(item, number, is_root):
+        # Returns how many items show below ``item`` when it is open.
+        shown, child = 0, mu.pdf_dict_gets(item, 'First')
+        while mu.pdf_is_dict(child) and mu.pdf_to_num(child) not in seen:
+            seen.add(mu.pdf_to_num(child))
+            below = visit(child, mu.pdf_to_num(child), False)
+            shown += 1 + (below if mu.pdf_to_int(mu.pdf_dict_gets(child, 'Count')) >= 0 else 0)
+            child = mu.pdf_dict_gets(child, 'Next')
+        count = mu.pdf_dict_gets(item, 'Count')
+        old = mu.pdf_to_int(count) if mu.pdf_is_int(count) else None
+        new = shown if is_root or not (old or 0) < 0 else -shown
+        if not shown and not is_root:
+            new = None
+        if new != old:
+            doc.xref_set_key(number, 'Count', 'null' if new is None else str(new))
+        return shown
+
+    if xref:
+        visit(mu.pdf_load_object(pdf, xref), xref, True)
 
 
 class PDF:
