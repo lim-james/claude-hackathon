@@ -3,7 +3,7 @@ import { useEditor } from '../store/editor';
 import type { Deck, Slide, SlideElement, TextElement } from '../model/types';
 import { aabb, getLayout, htmlToText, placeholderKind, resolveElement, slideBackground } from '../model/resolve';
 import { backgroundColor, contrastRatio, resolveColor, resolveFont, toHex } from '../model/theme';
-import { textPt } from '../model/units';
+import { chartPt, formatPt, smallestTextPt, tablePt, textPt } from '../model/units';
 
 export type Severity = 'error' | 'warning' | 'tip';
 export type FixKind = 'offslide' | 'alt' | 'contrast' | 'none';
@@ -59,6 +59,9 @@ export function runChecks(deck: Deck): Issue[] {
     let words = 0;
     let hasTitle = false;
     let titlePlaceholder = false;
+    const small = (pt: number | null, id: string) => {
+      if (pt !== null && pt < 12) add('warning', `Text at ${formatPt(pt)} pt will be hard to read when projected. Aim for 18 pt or more.`, id);
+    };
     for (const el of els) {
       const b = aabb(el);
       const outX = Math.max(0, -b.x) + Math.max(0, b.x + b.w - deck.size.w);
@@ -77,7 +80,7 @@ export function runChecks(deck: Deck): Issue[] {
         words += text.split(/\s+/).filter(Boolean).length;
         fonts.add(resolveFont(el.style.fontFamily, deck.theme));
         const pt = pxToPt(el.style.fontSize, deck);
-        if (pt < 12) add('warning', `Text at ${Math.round(pt)} pt will be hard to read when projected. Aim for 18 pt or more.`, el.id);
+        small(smallestTextPt(el.style.fontSize, el.html, deck.size), el.id);
         const fg = toHex(resolveColor(el.style.color, deck.theme));
         const bg = colorBehind(deck, slide, els, el);
         if (fg && bg) {
@@ -89,7 +92,11 @@ export function runChecks(deck: Deck): Issue[] {
       }
       if (el.type === 'image' && el.assetId && el.assetId !== 'theme:logo' && !el.alt?.trim()) add('warning', 'Image has no alt text for screen readers.', el.id, 'alt');
       if (el.type === 'chart' && !el.title.trim() && !el.alt?.trim()) add('tip', 'Chart has no title or alt text, so its point isn’t stated.', el.id, 'alt');
+      if (el.type === 'table' && el.rows.some((r) => r.some((c) => c.trim()))) small(tablePt(el.style.fontSize, deck.size), el.id);
       if (el.type === 'chart') {
+        // Axis, legend and value labels are the chart's smallest text; a pie without legend or values has none.
+        const pie = el.chartType === 'pie' || el.chartType === 'doughnut';
+        if (!pie || el.showLegend || el.showValues) small(chartPt(el.fontSize, deck.size), el.id);
         const n = el.data.labels.length;
         if (el.data.series.some((s) => s.values.length < n || s.values.some((v) => typeof v !== 'number' || Number.isNaN(v)))) add('warning', 'Chart data has empty or non-numeric cells; they plot as zero.', el.id);
       }

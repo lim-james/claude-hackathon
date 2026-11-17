@@ -7,7 +7,7 @@ import JSZip from 'jszip';
 import type { Asset, Background, ChartElement, Deck, ImageElement, ShapeElement, SlideElement, TableElement, TextElement, Theme } from '../model/types';
 import { applyTokens, getLayout, resolveElement, slideBackground } from '../model/resolve';
 import { chartPalette, resolveColor, resolveFont, toHex } from '../model/theme';
-import { ptPerPx as slidePtPerPx, slideInches } from '../model/units';
+import { chartPt, ptPerPx as slidePtPerPx, slideInches, tablePt, textPt } from '../model/units';
 import { SlideView } from '../render/SlideView';
 import { chartColors } from '../render/ChartView';
 import { downloadBlob, safeFilename } from './deckfile';
@@ -83,7 +83,7 @@ export function htmlToRuns(html: string, base: RunBase, ptPerPx: number, theme: 
       const h = toHex(st.color);
       if (h) s.color = h.slice(1).toUpperCase();
     }
-    if (st.fontSize && st.fontSize.endsWith('px')) s.fontSize = Math.round(parseFloat(st.fontSize) * ptPerPx * 10) / 10;
+    if (st.fontSize && st.fontSize.endsWith('px')) s.fontSize = textPt(parseFloat(st.fontSize), ptPerPx);
     if (st.fontFamily) s.fontFace = st.fontFamily.split(',')[0].replace(/["']/g, '').trim();
     el.childNodes.forEach((c) => walk(c, s, out));
   };
@@ -284,7 +284,7 @@ function addText(s: PptxGenJS.Slide, el: TextElement, pos: Pos, theme: Theme, pt
   const st = el.style;
   const base: RunBase = {
     fontFace: resolveFont(st.fontFamily, theme),
-    fontSize: Math.round(st.fontSize * ptPerPx * 10) / 10,
+    fontSize: textPt(st.fontSize, ptPerPx),
     color: hex6(st.color, theme) ?? '000000',
     bold: st.bold,
     italic: st.italic,
@@ -343,7 +343,7 @@ function addChart(pptx: PptxGenJS, s: PptxGenJS.Slide, el: ChartElement, pos: Po
   const data = series.map((sr) => ({ name: xmlSafe(sr.name), labels, values: el.data.labels.map((_, i) => sr.values[i] ?? 0) }));
   const colors = chartColors(el, theme).map((c) => (toHex(c) ?? '#000000').slice(1).toUpperCase());
   const text = hex6(el.textColor, theme) ?? '333333';
-  const fs = Math.max(6, Math.round(el.fontSize * ptPerPx * 0.85));
+  const fs = chartPt(el.fontSize, ptPerPx);
   const face = resolveFont(el.fontFamily, theme);
   s.addChart(types[el.chartType], data, {
     x: pos.x,
@@ -409,7 +409,7 @@ function addTable(s: PptxGenJS.Slide, el: TableElement, pos: Pos, theme: Theme, 
     colW: Array(cols).fill(pos.w / cols),
     rowH: pos.h / Math.max(1, el.rows.length),
     fontFace: resolveFont(st.fontFamily, theme),
-    fontSize: Math.max(6, Math.round(st.fontSize * ptPerPx * 10) / 10),
+    fontSize: tablePt(st.fontSize, ptPerPx),
     color: hex6(st.color, theme),
     valign: 'middle',
     border: border ? { type: 'solid', pt: 1, color: border } : { type: 'none' },

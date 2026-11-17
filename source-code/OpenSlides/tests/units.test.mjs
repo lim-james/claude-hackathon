@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ptPerPx, slideInches, textPt } from '../src/model/units.ts';
+import { chartPt, formatPt, ptPerPx, slideInches, smallestTextPt, tablePt, textPt } from '../src/model/units.ts';
 
 // The deck check (src/doctor/checks.ts) and the PowerPoint export
 // (src/io/export.tsx) both take their scale from these two functions.
@@ -51,4 +51,63 @@ test('large-text threshold: 36 px on a 1920 px side is 18 pt either way up, 34 p
   assert.equal(textPt(36, { w: 1080, h: 1920 }), 18);
   assert.equal(textPt(36, { w: 1920, h: 1080 }), 18);
   assert.equal(textPt(34, { w: 1080, h: 1920 }), 17);
+});
+
+// Deck check (#127, #129): the size it reports is the smallest size the export writes for the element.
+const W169 = { w: 1920, h: 1080 };
+
+test('a text box reports its smallest exported run, including a size set on a selection', () => {
+  assert.equal(smallestTextPt(48, '<p><span style="font-size: 16px;">Inline sized text</span></p>', W169), 8);
+  assert.equal(smallestTextPt(48, '<p>Big <span style="font-size: 16px;">small</span></p>', W169), 8);
+  assert.equal(smallestTextPt(16, '<p>Small <span style="font-size: 48px;">big</span></p>', W169), 8);
+  assert.equal(smallestTextPt(48, '<p>Big <span style="font-size: 40px;">bigger</span></p>', W169), 20);
+  // Nested spans: the inner size wins; text after a closed span is back at the box size.
+  assert.equal(smallestTextPt(48, '<p><span style="font-size: 30px;">a<span style="font-size: 20px;">b</span></span>c</p>', W169), 10);
+  assert.equal(smallestTextPt(48, '<p><span style="font-size: 30px;">a<br>b</span>c</p>', W169), 15);
+});
+
+test('a sized span with no visible text, and an empty box, do not count', () => {
+  assert.equal(smallestTextPt(48, '<p>Big<span style="font-size: 10px;"> </span></p>', W169), 24);
+  assert.equal(smallestTextPt(48, '<p>Big<span style="font-size: 10px;">&nbsp;</span></p>', W169), 24);
+  assert.equal(smallestTextPt(48, '<p><br></p>', W169), null);
+  assert.equal(smallestTextPt(48, '', W169), null);
+});
+
+test('font-size on a paragraph or list item is ignored, as the export ignores it', () => {
+  assert.equal(smallestTextPt(48, '<p style="font-size: 10px;">x</p><ul><li style="font-size: 10px;">y</li></ul>', W169), 24);
+});
+
+test("the issue's 16:9 slide: 16 px span, 16 px table and a new 26 px chart are each under 12 pt", () => {
+  assert.ok(smallestTextPt(48, '<p><span style="font-size: 16px;">t</span></p>', W169) < 12);
+  assert.equal(tablePt(16, W169), 8);
+  assert.equal(chartPt(26, W169), 11);
+});
+
+test('table and chart sizes match the export floor and rounding', () => {
+  assert.equal(tablePt(24, W169), 12);
+  assert.equal(tablePt(4, W169), 6);
+  assert.equal(chartPt(34, W169), 14);
+  assert.equal(chartPt(4, W169), 6);
+  // The export passes ptPerPx it worked out once; the result is the same.
+  assert.equal(chartPt(26, ptPerPx(W169)), chartPt(26, W169));
+  assert.equal(tablePt(23, ptPerPx(W169)), tablePt(23, W169));
+});
+
+for (const [name, w, h, px, shown] of [
+  ['16:9', 1920, 1080, 23, '11.5'],
+  ['9:16', 1080, 1920, 23, '11.5'],
+  ['16:9', 1920, 1080, 22, '11'],
+  ['4:3', 1440, 1080, 17, '11.3'],
+]) {
+  test(`${px} px on ${name} is flagged as ${shown} pt, the exported size`, () => {
+    const pt = smallestTextPt(px, '<p>Body text</p>', { w, h });
+    assert.ok(pt < 12);
+    assert.equal(formatPt(pt), shown);
+    assert.equal(pt, textPt(px, { w, h }));
+  });
+}
+
+test('text exported at exactly 12 pt is not under 12', () => {
+  assert.equal(smallestTextPt(24, '<p>x</p>', W169), 12);
+  assert.equal(formatPt(12), '12');
 });
