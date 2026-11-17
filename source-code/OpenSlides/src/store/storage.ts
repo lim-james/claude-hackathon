@@ -1,7 +1,7 @@
 import { del, delMany, get, getMany, keys, set } from 'idb-keyval';
 import type { Asset, Deck } from '../model/types';
 import { uid } from '../model/factory';
-import { useEditor } from './editor';
+import { flushPendingText, hasPendingText, onPendingText, useEditor } from './editor';
 import { createSaveScheduler } from './saveScheduler';
 import { isSplitRecord, joinDeck, splitDeck, type DeckRecord } from './deckRecord';
 
@@ -108,17 +108,24 @@ export async function listDecks(): Promise<Deck[]> {
 }
 
 export type SaveStatus = 'saved' | 'saving' | 'error';
-let status: SaveStatus = 'saved';
+let schedulerStatus: SaveStatus = 'saved'; // what the scheduler last reported
+// Text typed but not yet in the deck is not saved either (#123).
+const status = (): SaveStatus => (schedulerStatus === 'saved' && hasPendingText() ? 'saving' : schedulerStatus);
 const listeners = new Set<(s: SaveStatus) => void>();
 export function onSaveStatus(fn: (s: SaveStatus) => void) {
   listeners.add(fn);
-  fn(status);
+  fn(status());
   return () => listeners.delete(fn);
 }
-function setStatus(s: SaveStatus) {
-  status = s;
+const emit = () => {
+  const s = status();
   listeners.forEach((l) => l(s));
+};
+function setStatus(s: SaveStatus) {
+  schedulerStatus = s;
+  emit();
 }
+onPendingText(emit);
 
 const scheduler = createSaveScheduler<Deck>({
   write: (deck) => saveDeck({ ...deck, updatedAt: Date.now() }),
@@ -127,14 +134,25 @@ const scheduler = createSaveScheduler<Deck>({
 
 /** Autosaves the open deck while it is edited, and when the page is hidden or closed. */
 export function startAutosave() {
+  let leavingNow = false;
   const unsubscribe = useEditor.subscribe((state, prev) => {
     const deck = state.deck;
     if (!deck || deck === prev.deck) return;
     if (prev.deck && prev.deck.id !== deck.id) scheduler.open(deck);
     else scheduler.change(deck);
+    // Start the write inside the update, so it is not queued behind the re-render it causes.
+    if (leavingNow) void flushSave().catch(() => {});
   });
   // A hidden tab can be discarded and a closing one is gone: write pending edits now.
-  const leaving = () => void flushSave().catch(() => {});
+  const leaving = () => {
+    leavingNow = true;
+    try {
+      flushPendingText(); // text still being typed goes into the deck first (#123)
+    } finally {
+      leavingNow = false;
+    }
+    void flushSave().catch(() => {});
+  };
   const hidden = () => {
     if (document.visibilityState === 'hidden') leaving();
   };

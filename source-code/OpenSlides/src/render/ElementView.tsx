@@ -1,4 +1,4 @@
-import { memo, useMemo, useEffect, useLayoutEffect, useRef, type CSSProperties, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
+import { memo, useCallback, useMemo, useEffect, useLayoutEffect, useRef, type CSSProperties, type TdHTMLAttributes, type PointerEvent as RPointerEvent, type ReactNode } from 'react';
 import type { Deck, ImageElement, ShapeElement, SlideElement, TableElement, TextElement, Theme } from '../model/types';
 import { fontStack, resolveColor, resolveFont } from '../model/theme';
 import { applyTokens, isEmptyHtml, type TokenContext } from '../model/resolve';
@@ -7,6 +7,7 @@ import { ChartView } from './ChartView';
 import { rememberSelection, sanitizeHtml } from './richtext';
 import type { BuildInfo } from './builds';
 import { xmlSafe } from '../io/xmlText';
+import { clearPendingText, setPendingText } from '../store/editor';
 
 export type RenderMode = 'edit' | 'thumb' | 'present' | 'export';
 
@@ -30,8 +31,57 @@ export interface ElementViewProps {
   onPointerDown?: (e: RPointerEvent, el: SlideElement) => void;
   onDoubleClick?: (el: SlideElement) => void;
   onTextCommit?: (el: TextElement, html: string) => void;
+  /** Text typed so far, while the box is still being edited: autosave stores it (#123). */
+  onTextDraft?: (el: TextElement, html: string) => void;
   onTextMeasure?: (el: TextElement, h: number) => void;
   onTableCommit?: (el: TableElement, rows: string[][]) => void;
+  onTableDraft?: (el: TableElement, rows: string[][]) => void;
+}
+
+// Each draft re-renders the editor, so typing does not draft on every key:
+// the text goes into the deck when typing pauses, and at least this often while it goes on.
+const DRAFT_PAUSE_MS = 600;
+const DRAFT_MAX_MS = 3000;
+
+/**
+ * Typed text reaches the deck through `put` (#123). `typed()` after each input;
+ * `drop()` forgets what is pending when the edit is committed instead. Unmounting
+ * or leaving the page (flushPendingText) puts what is pending at once.
+ */
+function useDraft(put: (() => void) | undefined) {
+  const pause = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const max = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const putRef = useRef(put);
+  putRef.current = put;
+  const cancel = useCallback(() => {
+    if (pause.current === null) return false;
+    clearTimeout(pause.current);
+    clearTimeout(max.current!);
+    pause.current = max.current = null;
+    return true;
+  }, []);
+  const now = useCallback(() => {
+    if (!cancel()) return;
+    putRef.current?.(); // into the deck first, so the save status never shows a gap
+    clearPendingText(now);
+  }, [cancel]);
+  const typed = useCallback(() => {
+    if (!putRef.current) return;
+    if (pause.current !== null) clearTimeout(pause.current);
+    pause.current = setTimeout(now, DRAFT_PAUSE_MS);
+    if (max.current === null) {
+      max.current = setTimeout(now, DRAFT_MAX_MS);
+      setPendingText(now);
+    }
+  }, [now]);
+  useEffect(() => now, [now]);
+  return {
+    typed,
+    drop: useCallback(() => {
+      cancel();
+      clearPendingText(now);
+    }, [cancel, now]),
+  };
 }
 
 export function textCss(el: TextElement, theme: Theme): CSSProperties {
@@ -49,9 +99,10 @@ export function textCss(el: TextElement, theme: Theme): CSSProperties {
   };
 }
 
-function TextEditable({ el, theme, listDefault, onCommit, onMeasure }: { el: TextElement; theme: Theme; listDefault?: boolean; onCommit: (html: string) => void; onMeasure?: (h: number) => void }) {
+function TextEditable({ el, theme, listDefault, onCommit, onDraft, onMeasure }: { el: TextElement; theme: Theme; listDefault?: boolean; onCommit: (html: string) => void; onDraft?: (html: string) => void; onMeasure?: (h: number) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const committed = useRef(false);
+  const draft = useDraft(onDraft && (() => ref.current && !committed.current && onDraft(sanitizeHtml(ref.current.innerHTML))));
   useLayoutEffect(() => {
     const node = ref.current!;
     node.innerHTML = el.html && !isEmptyHtml(el.html) ? sanitizeHtml(el.html) : listDefault ? '<ul><li><br></li></ul>' : '<p><br></p>';
@@ -73,6 +124,7 @@ function TextEditable({ el, theme, listDefault, onCommit, onMeasure }: { el: Tex
       // React StrictMode re-runs effects on the same node; only commit if the editor really left the page.
       setTimeout(() => {
         if (!committed.current && !node.isConnected) {
+          draft.drop();
           committed.current = true;
           onCommit(sanitizeHtml(node.innerHTML));
         }
@@ -91,6 +143,7 @@ function TextEditable({ el, theme, listDefault, onCommit, onMeasure }: { el: Tex
       onPointerDown={(e) => e.stopPropagation()}
       onInput={() => {
         if (onMeasure && ref.current) onMeasure(ref.current.offsetHeight);
+        draft.typed();
       }}
       onPaste={(e) => {
         // Keep pasted text clean: plain text only, line breaks preserved, nothing a .pptx cannot carry.
@@ -119,6 +172,7 @@ function TextEditable({ el, theme, listDefault, onCommit, onMeasure }: { el: Tex
         const next = e.relatedTarget as HTMLElement | null;
         if (next && next.closest('[data-keep-editing]')) return;
         if (committed.current) return;
+        draft.drop();
         committed.current = true;
         onCommit(sanitizeHtml(ref.current!.innerHTML));
       }}
@@ -127,7 +181,7 @@ function TextEditable({ el, theme, listDefault, onCommit, onMeasure }: { el: Tex
   );
 }
 
-function TextBlock({ el, deck, mode, tokens, prompt, editing, listDefault, onTextCommit, onTextMeasure }: ElementViewProps & { el: TextElement }) {
+function TextBlock({ el, deck, mode, tokens, prompt, editing, listDefault, onTextCommit, onTextDraft, onTextMeasure }: ElementViewProps & { el: TextElement }) {
   const theme = deck.theme;
   const innerRef = useRef<HTMLDivElement>(null);
   const empty = isEmptyHtml(el.html);
@@ -161,6 +215,7 @@ function TextBlock({ el, deck, mode, tokens, prompt, editing, listDefault, onTex
           theme={theme}
           listDefault={listDefault}
           onCommit={(h) => onTextCommit?.(el, h)}
+          onDraft={onTextDraft && ((h) => onTextDraft(el, h))}
           onMeasure={el.autoHeight && onTextMeasure ? (h) => onTextMeasure(el, h + el.padding * 2) : undefined}
         />
       ) : empty && mode === 'edit' && prompt ? (
@@ -226,13 +281,45 @@ function ImageBlock({ el, deck, mode, prompt }: { el: ImageElement; deck: Deck; 
   );
 }
 
-function TableBlock({ el, theme, editing, onCommit }: { el: TableElement; theme: Theme; editing?: boolean; onCommit?: (rows: string[][]) => void }) {
+/** A cell being edited: React sets its text once, so a draft reaching the deck cannot move the caret. */
+function EditingCell({ text, ...props }: { text: string } & TdHTMLAttributes<HTMLTableCellElement>) {
+  const ref = useRef<HTMLTableCellElement>(null);
+  useLayoutEffect(() => {
+    ref.current!.textContent = text;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return <td ref={ref} contentEditable suppressContentEditableWarning {...props} />;
+}
+
+function TableBlock({ el, theme, editing, onCommit, onDraft }: { el: TableElement; theme: Theme; editing?: boolean; onCommit?: (rows: string[][]) => void; onDraft?: (rows: string[][]) => void }) {
   const s = el.style;
   const rowsRef = useRef<string[][]>(el.rows.map((r) => [...r]));
   useEffect(() => {
     rowsRef.current = el.rows.map((r) => [...r]);
   }, [el.rows]);
   const cols = Math.max(1, ...el.rows.map((r) => r.length));
+  const cellText = (td: HTMLElement) => (td.innerText ?? '').replace(/\n+$/, '');
+  // The rows with one cell's text in place, or null when that is what they hold already.
+  const withCell = (ri: number, ci: number, text: string) => {
+    const rows = rowsRef.current.map((r) => [...r]);
+    while (rows[ri].length < cols) rows[ri].push('');
+    if (rows[ri][ci] === text) return null;
+    rows[ri][ci] = text;
+    return rows;
+  };
+  const typing = useRef<{ ri: number; ci: number; td: HTMLElement } | null>(null);
+  const drafted = useRef(false); // a draft went into the deck since the last commit
+  const draft = useDraft(
+    onDraft &&
+      (() => {
+        const t = typing.current;
+        const rows = t && withCell(t.ri, t.ci, cellText(t.td));
+        if (!rows) return;
+        rowsRef.current = rows;
+        drafted.current = true;
+        onDraft(rows);
+      }),
+  );
   const border = resolveColor(s.borderColor, theme);
   return (
     <table
@@ -255,38 +342,46 @@ function TableBlock({ el, theme, editing, onCommit }: { el: TableElement; theme:
           const bg = header ? resolveColor(s.headerFill, theme) : s.stripe && ri % 2 === (el.headerRow ? 0 : 1) ? resolveColor(s.stripeFill, theme) : 'transparent';
           return (
             <tr key={ri} style={{ background: bg, height: `${100 / el.rows.length}%` }}>
-              {Array.from({ length: cols }, (_, ci) => (
-                <td
-                  key={ci}
-                  contentEditable={editing}
-                  suppressContentEditableWarning
-                  onBlur={(e) => {
-                    if (!editing) return;
-                    const text = (e.currentTarget.innerText ?? '').replace(/\n+$/, '');
-                    const rows = rowsRef.current.map((r) => [...r]);
-                    while (rows[ri].length < cols) rows[ri].push('');
-                    if (rows[ri][ci] !== text) {
-                      rows[ri][ci] = text;
-                      rowsRef.current = rows;
-                      onCommit?.(rows);
-                    }
-                  }}
-                  onKeyDown={(e) => e.stopPropagation()}
-                  style={{
-                    border: `2px solid ${border}`,
-                    padding: `${s.fontSize * 0.35}px ${s.fontSize * 0.55}px`,
-                    fontWeight: header ? 700 : 400,
-                    color: header ? resolveColor(s.headerColor, theme) : undefined,
-                    verticalAlign: 'middle',
-                    overflow: 'hidden',
-                    wordBreak: 'break-word',
-                    outline: 'none',
-                    cursor: editing ? 'text' : undefined,
-                  }}
-                >
-                  {row[ci] ?? ''}
-                </td>
-              ))}
+              {Array.from({ length: cols }, (_, ci) => {
+                const style: CSSProperties = {
+                  border: `2px solid ${border}`,
+                  padding: `${s.fontSize * 0.35}px ${s.fontSize * 0.55}px`,
+                  fontWeight: header ? 700 : 400,
+                  color: header ? resolveColor(s.headerColor, theme) : undefined,
+                  verticalAlign: 'middle',
+                  overflow: 'hidden',
+                  wordBreak: 'break-word',
+                  outline: 'none',
+                  cursor: editing ? 'text' : undefined,
+                };
+                if (!editing) {
+                  return (
+                    <td key={ci} style={style}>
+                      {row[ci] ?? ''}
+                    </td>
+                  );
+                }
+                return (
+                  <EditingCell
+                    key={`edit-${ci}`}
+                    text={row[ci] ?? ''}
+                    style={style}
+                    onInput={(e) => {
+                      typing.current = { ri, ci, td: e.currentTarget };
+                      draft.typed();
+                    }}
+                    onBlur={(e) => {
+                      draft.drop();
+                      const rows = withCell(ri, ci, cellText(e.currentTarget));
+                      if (rows) rowsRef.current = rows;
+                      // A drafted cell already matches the deck; the commit still makes its undo step.
+                      if (rows || drafted.current) onCommit?.(rows ?? rowsRef.current.map((r) => [...r]));
+                      drafted.current = false;
+                    }}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  />
+                );
+              })}
             </tr>
           );
         })}
@@ -341,7 +436,15 @@ function ElementViewInner(props: ElementViewProps) {
       content = <ChartView el={el} theme={theme} />;
       break;
     case 'table':
-      content = <TableBlock el={el} theme={theme} editing={editing} onCommit={(rows) => props.onTableCommit?.(el, rows)} />;
+      content = (
+        <TableBlock
+          el={el}
+          theme={theme}
+          editing={editing}
+          onCommit={(rows) => props.onTableCommit?.(el, rows)}
+          onDraft={props.onTableDraft && ((rows) => props.onTableDraft!(el, rows))}
+        />
+      );
       break;
   }
   return (

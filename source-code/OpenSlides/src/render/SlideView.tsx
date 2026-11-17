@@ -19,8 +19,10 @@ export interface SlideViewProps {
   onElementPointerDown?: (e: RPointerEvent, el: SlideElement) => void;
   onElementDoubleClick?: (el: SlideElement) => void;
   onTextCommit?: (el: TextElement, html: string) => void;
+  onTextDraft?: (el: TextElement, html: string) => void;
   onTextMeasure?: (el: TextElement, h: number) => void;
   onTableCommit?: (el: TableElement, rows: string[][]) => void;
+  onTableDraft?: (el: TableElement, rows: string[][]) => void;
   children?: ReactNode;
 }
 
@@ -89,8 +91,10 @@ function SlideViewInner(props: SlideViewProps) {
               onPointerDown={props.onElementPointerDown}
               onDoubleClick={props.onElementDoubleClick}
               onTextCommit={props.onTextCommit}
+              onTextDraft={props.onTextDraft}
               onTextMeasure={props.onTextMeasure}
               onTableCommit={props.onTableCommit}
+              onTableDraft={props.onTableDraft}
             />
           );
         })}

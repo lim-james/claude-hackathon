@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as RPointerEvent } from 'react';
 import { Minus, Plus, Scan } from 'lucide-react';
-import { checkpoint, currentElements, currentSlide, useEditor } from '../store/editor';
+import { checkpoint, currentElements, currentSlide, mutate, useEditor } from '../store/editor';
 import {
   clearSelection,
   deleteSelection,
@@ -11,7 +11,8 @@ import {
   setSelection,
 } from '../store/actions';
 import { aabb, getLayout, intersects, isEmptyHtml, resolveElement, unionBox, type Box } from '../model/resolve';
-import type { SlideElement, TableElement, TextElement } from '../model/types';
+import type { Deck, SlideElement, TableElement, TextElement } from '../model/types';
+import type { Draft } from 'immer';
 import { SlideView } from '../render/SlideView';
 import { scaleInlineFontSizes, forgetSelection } from '../render/richtext';
 import { snapBox, snapEdge } from './snap';
@@ -22,6 +23,15 @@ type Session =
   | { kind: 'resize'; start: { x: number; y: number }; hx: number; hy: number; el0: SlideElement; moved: boolean }
   | { kind: 'rotate'; center: { x: number; y: number }; a0: number; el0: SlideElement; moved: boolean }
   | { kind: 'marquee'; start: { x: number; y: number }; base: string[] };
+
+/** An element by id on any slide or layout. */
+function findElement<E extends { id: string }>(deck: { slides: { elements: E[] }[]; layouts: { elements: E[] }[] }, id: string): E | undefined {
+  for (const list of [...deck.slides.map((x) => x.elements), ...deck.layouts.map((x) => x.elements)]) {
+    const e = list.find((x) => x.id === id);
+    if (e) return e;
+  }
+  return undefined;
+}
 
 function resolvedCurrent(): SlideElement[] {
   const s = useEditor.getState();
@@ -307,9 +317,68 @@ export function Canvas() {
     }
   }, []);
 
+  // #123: typing puts its text into the deck as it goes, with no undo step per draft:
+  // the first draft of an edit records one step, and the commit below turns
+  // the drafts back before it makes the edit's step as it always did.
+  const drafting = useRef<{ id: string; before: Deck; restore: (e: Draft<SlideElement>) => void } | null>(null);
+
+  const putDraft = useCallback((id: string, restore: (e: Draft<SlideElement>) => void, apply: (e: Draft<SlideElement>) => void) => {
+    const st = useEditor.getState();
+    const d = drafting.current;
+    if (!d || d.id !== id || st.past[st.past.length - 1] !== d.before) {
+      checkpoint();
+      const past = useEditor.getState().past;
+      drafting.current = { id, before: past[past.length - 1], restore };
+    }
+    // By id across slides and layouts: a draft can arrive after the slide changed.
+    mutate((deck) => {
+      const e = findElement(deck, id);
+      if (e) apply(e);
+    }, false);
+  }, []);
+
+  /** Ends a drafted edit of `id`: its drafts are undone, its undo step dropped, so the commit can make it. */
+  const undoDrafts = (id: string) => {
+    const d = drafting.current;
+    if (d?.id !== id) return;
+    drafting.current = null;
+    const past = useEditor.getState().past;
+    if (past[past.length - 1] !== d.before) return; // another step came after: the drafts stay as they are
+    useEditor.setState({ past: past.slice(0, -1) });
+    mutate((deck) => {
+      const e = findElement(deck, id);
+      if (e) d.restore(e);
+    }, false);
+  };
+
+  const onTextDraft = useCallback(
+    (el: TextElement, html: string) => {
+      const deck = useEditor.getState().deck;
+      const current = deck && findElement(deck, el.id);
+      if (!current || current.type !== 'text') return;
+      const next = isEmptyHtml(html) ? '' : html;
+      if (next === current.html) return;
+      const was = current.html;
+      putDraft(el.id, (e) => void (e.type === 'text' && (e.html = was)), (e) => void (e.type === 'text' && (e.html = next)));
+    },
+    [putDraft],
+  );
+
+  const onTableDraft = useCallback(
+    (el: TableElement, rows: string[][]) => {
+      const deck = useEditor.getState().deck;
+      const current = deck && findElement(deck, el.id);
+      if (!current || current.type !== 'table') return;
+      const was = current.rows;
+      putDraft(el.id, (e) => void (e.type === 'table' && (e.rows = was)), (e) => void (e.type === 'table' && (e.rows = rows)));
+    },
+    [putDraft],
+  );
+
   const onTextCommit = useCallback((el: TextElement, html: string) => {
     const st = useEditor.getState();
     if (st.editingId === el.id) useEditor.setState({ editingId: null });
+    undoDrafts(el.id);
     const current = currentElements().find((e) => e.id === el.id);
     if (!current || current.type !== 'text') return;
     const empty = isEmptyHtml(html);
@@ -333,6 +402,9 @@ export function Canvas() {
   }, []);
 
   const onTableCommit = useCallback((el: TableElement, rows: string[][]) => {
+    undoDrafts(el.id);
+    const current = currentElements().find((e) => e.id === el.id);
+    if (current?.type === 'table' && JSON.stringify(current.rows) === JSON.stringify(rows)) return;
     editElements([el.id], (e) => {
       if (e.type === 'table') e.rows = rows;
     });
@@ -426,8 +498,10 @@ export function Canvas() {
             onElementPointerDown={onElementPointerDown}
             onElementDoubleClick={onElementDoubleClick}
             onTextCommit={onTextCommit}
+            onTextDraft={onTextDraft}
             onTextMeasure={onTextMeasure}
             onTableCommit={onTableCommit}
+            onTableDraft={onTableDraft}
           />
           <div className="overlay">
             {selected.map((el) => (

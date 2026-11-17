@@ -120,6 +120,42 @@ export function setToast(msg: string | null, ms = 2600) {
   }
 }
 
+// ---------- text being typed ----------
+// A text box or table cell puts what is typed into the deck a moment later
+// (ElementView). Until then the text is only on screen: autosave must not
+// report it as saved, and leaving the page must put it in the deck first.
+
+let pendingText: (() => void) | null = null;
+const pendingListeners = new Set<() => void>();
+
+/** The open text editor has typed text not yet in the deck; `put` puts it there now. */
+export function setPendingText(put: () => void) {
+  const was = pendingText;
+  pendingText = put;
+  if (!was) pendingListeners.forEach((l) => l());
+}
+
+/** The text `put` was holding is in the deck now, or was dropped. */
+export function clearPendingText(put: () => void) {
+  if (pendingText !== put) return;
+  pendingText = null;
+  pendingListeners.forEach((l) => l());
+}
+
+export function hasPendingText() {
+  return pendingText !== null;
+}
+
+/** Puts text still being typed into the deck now. */
+export function flushPendingText() {
+  pendingText?.();
+}
+
+export function onPendingText(fn: () => void) {
+  pendingListeners.add(fn);
+  return () => void pendingListeners.delete(fn);
+}
+
 // ---------- selectors ----------
 
 export function currentSlide(s: EditorState = get()): Slide | null {
