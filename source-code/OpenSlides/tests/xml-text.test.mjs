@@ -33,3 +33,24 @@ test('text XML can carry comes back unchanged', () => {
     assert.equal(xmlSafe(s), s);
   }
 });
+
+test('half of an emoji (a lone surrogate) becomes U+FFFD, a whole emoji is kept', () => {
+  assert.equal(xmlSafe('end \uD83D'), 'end �');
+  assert.equal(xmlSafe('\uDE00 start'), '� start');
+  assert.equal(xmlSafe('a\uDE00\uD83Db'), 'a��b');
+  assert.equal(xmlSafe('\uD83D\u0001'), '�');
+  assert.equal(xmlSafe('ok 😀 \uD83D'), 'ok 😀 �');
+  assert.ok(xmlSafe('x'.repeat(4999) + '\uD83D').isWellFormed());
+});
+
+test('xmlSafe stays fast on a long text full of emoji', () => {
+  const text = ('word 😀 ').repeat(1_114_112 / 8);
+  const times = [];
+  for (let i = 0; i < 21; i++) {
+    const t = performance.now();
+    assert.equal(xmlSafe(text), text);
+    times.push(performance.now() - t);
+  }
+  times.sort((a, b) => a - b);
+  assert.ok(times[10] <= 10, `median ${times[10].toFixed(2)} ms`);
+});

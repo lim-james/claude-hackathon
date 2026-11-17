@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { currentSlide, openDeck, redo, setToast, undo, useEditor } from '../store/editor';
 import { flushSave, loadDeck } from '../store/storage';
+import { cutText } from '../model/cutText';
 import {
   clearSelection,
   copySelection,
@@ -32,6 +33,8 @@ import { StudioSidebar } from '../studio/StudioSidebar';
 import '../styles/studio.css';
 
 const CLIP_MIME = 'application/x-deckforge';
+// Text pasted onto the slide (not into a box) becomes a new text box of at most this many UTF-16 units.
+const PASTE_LIMIT = 5000;
 
 function isTyping(t: EventTarget | null) {
   const el = t as HTMLElement | null;
@@ -190,8 +193,11 @@ function useClipboard() {
         e.preventDefault();
         const d = useEditor.getState().deck!;
         const u = Math.min(d.size.w, d.size.h) / 1080;
-        const el = makeText(d.size.w * 0.2, d.size.h * 0.4, d.size.w * 0.6, 60 * u, paragraphs(text.trim().slice(0, 5000)), { fontSize: Math.round(36 * u) });
+        const whole = text.trim();
+        const kept = cutText(whole, PASTE_LIMIT);
+        const el = makeText(d.size.w * 0.2, d.size.h * 0.4, d.size.w * 0.6, 60 * u, paragraphs(kept), { fontSize: Math.round(36 * u) });
         addElements([el]);
+        if (kept.length < whole.length) setToast(`Pasted the first ${PASTE_LIMIT.toLocaleString('en-US')} characters only. The rest of the text was left out.`, 8000);
       }
     };
     document.addEventListener('copy', copy);
