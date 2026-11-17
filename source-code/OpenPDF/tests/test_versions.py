@@ -43,8 +43,8 @@ class VersionHistoryTests(unittest.TestCase):
         self.assertEqual(versions.read_version(self.doc_path, record['id']), data)
 
     def test_versions_are_sorted_newest_first(self):
-        a = versions.save_version(self.doc_path, make_pdf(), 'A')
-        b = versions.save_version(self.doc_path, make_pdf(), 'B')
+        a = versions.save_version(self.doc_path, make_pdf(text='a'), 'A')
+        b = versions.save_version(self.doc_path, make_pdf(text='b'), 'B')
         ids = [r['id'] for r in versions.list_versions(self.doc_path)]
         self.assertEqual(ids, [b['id'], a['id']])
 
@@ -237,9 +237,12 @@ class HistorySizeTests(unittest.TestCase):
         # What Save version passes for an unprotected document; each call renews the trailer /ID.
         datas = [self.pdf.doc.tobytes(garbage=4, deflate=True) for _ in range(5)]
         self.assertNotEqual(datas[0], datas[1])
-        for n, data in enumerate(datas):
-            versions.save_version(self.doc_path, data, f'v{n + 1}')
-        self.assertEqual(len(versions.list_versions(self.doc_path)), 5)
+        first = versions.save_version(self.doc_path, datas[0], 'v1')
+        for n, data in enumerate(datas[1:]):
+            again = versions.save_version(self.doc_path, data, f'v{n + 2}')
+            self.assertTrue(again['unchanged'])
+            self.assertEqual(again['id'], first['id'])
+        self.assertEqual([r['label'] for r in versions.list_versions(self.doc_path)], ['v1'])
         self.assertEqual(len(self.stored_files()), 1)
         self.pdf.doc[0].insert_text((72, 144), 'an edit')
         versions.save_version(self.doc_path, self.pdf.doc.tobytes(garbage=4, deflate=True), 'edited')
@@ -257,10 +260,8 @@ class HistorySizeTests(unittest.TestCase):
         self.assertEqual(versions.LIMIT, 20)
 
     def test_deleting_one_of_two_versions_sharing_a_file_keeps_the_other(self):
-        data = self.pdf.snapshot_bytes()
-        a = versions.save_version(self.doc_path, data, 'a')
-        b = versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'b')
-        self.assertEqual(b['file'], a['id'])
+        a = versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'a')
+        b = self.add_shared_record(a, 'b')
         versions.delete_version(self.doc_path, a['id'])
         restored = PDF.unlocked(versions.read_version(self.doc_path, b['id']))
         self.assertEqual(len(restored), 3)
@@ -268,17 +269,67 @@ class HistorySizeTests(unittest.TestCase):
         versions.delete_version(self.doc_path, b['id'])
         self.assertEqual(self.stored_files(), [])
 
-    def test_trimming_a_shared_version_keeps_the_file_for_the_newer_one(self):
-        versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'a', limit=2)
-        self.pdf.doc[0].insert_text((72, 144), 'edit')
-        versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'b', limit=2)
-        self.pdf.doc[0].insert_text((72, 160), 'more')
-        same = self.pdf.snapshot_bytes()
-        versions.save_version(self.doc_path, same, 'c', limit=2)       # removes a
-        c2 = versions.save_version(self.doc_path, same, 'c again', limit=2)  # removes b, shares c's file
-        self.assertEqual([r['label'] for r in versions.list_versions(self.doc_path)], ['c again', 'c'])
-        self.assertEqual(len(self.stored_files()), 1)
-        self.assertTrue(versions.version_file(self.doc_path, c2['id']).exists())
+    def add_shared_record(self, record, label):
+        # Earlier builds of this branch recorded an unchanged save as a second
+        # record pointing at the same file; such histories must still work.
+        index_file = versions._index_file(versions._doc_dir(self.doc_path))
+        index = json.loads(index_file.read_text(encoding='utf-8'))
+        alias = dict(record, id=record['id'] + 'b', created=record['created'] + 0.001, label=label)
+        index_file.write_text(json.dumps(index + [alias]), encoding='utf-8')
+        return alias
+
+    def save_edited(self, text, **kw):
+        self.pdf.doc[0].insert_text((72, 100 + 3 * len(self.stored_files())), text)
+        return versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), text, **kw)
+
+    def test_unchanged_saves_never_push_out_a_distinct_version(self):
+        # Review of #120: with 19 distinct versions, unchanged saves used to add
+        # entries that counted toward the limit and deleted the oldest distinct ones.
+        for n in range(19):
+            self.save_edited(f'distinct {n}')
+        for n in range(3):
+            self.assertEqual(versions.next_removal(self.doc_path), [])
+            asked = []
+            again = versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), f'unchanged {n}',
+                                          confirm=lambda gone: asked.append(gone) or True)
+            self.assertTrue(again['unchanged'])
+            self.assertEqual(again['label'], 'distinct 18')
+            self.assertEqual(asked, [])                     # nothing to ask: nothing is removed
+        labels = [r['label'] for r in versions.list_versions(self.doc_path)]
+        self.assertEqual(labels, [f'distinct {n}' for n in reversed(range(19))])
+        self.assertEqual(len(self.stored_files()), 19)
+
+    def test_unchanged_and_distinct_saves_mixed_keep_the_newest_twenty_distinct(self):
+        first = self.save_edited('distinct 0')
+        for n in range(1, 19):
+            self.save_edited(f'distinct {n}')
+        restored = PDF.unlocked(versions.read_version(self.doc_path, first['id']))
+        self.pdf.replace(restored)                            # back to an old state: still stored
+        self.assertTrue(versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'old again')['unchanged'])
+        self.save_edited('distinct 19')                       # the 20th: removes nothing
+        self.assertEqual(len(versions.list_versions(self.doc_path)), 20)
+        self.assertTrue(versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'same')['unchanged'])
+        self.assertEqual(len(versions.list_versions(self.doc_path)), 20)
+        self.assertEqual([r['label'] for r in versions.next_removal(self.doc_path)], ['distinct 0'])
+        self.pdf.doc[0].insert_text((72, 700), 'distinct 20')
+        self.assertIsNone(versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'distinct 20',
+                                                confirm=lambda gone: False))   # declined: nothing changes
+        self.assertEqual(len(self.stored_files()), 20)
+        versions.save_version(self.doc_path, self.pdf.snapshot_bytes(), 'distinct 20', confirm=lambda gone: True)
+        labels = [r['label'] for r in versions.list_versions(self.doc_path)]
+        self.assertEqual(labels, [f'distinct {n}' for n in reversed(range(1, 21))])
+        self.assertEqual(len(self.stored_files()), 20)
+
+    def test_the_limit_counts_files_when_records_share_one(self):
+        a = self.save_edited('a', limit=2)
+        self.add_shared_record(a, 'a again')
+        b = self.save_edited('b', limit=2)
+        self.add_shared_record(b, 'b again')                 # 4 records, 2 files: within the limit of 2
+        self.assertEqual(len(versions.list_versions(self.doc_path)), 4)
+        self.assertEqual([r['label'] for r in versions.next_removal(self.doc_path, limit=2)], ['a', 'a again'])
+        self.save_edited('c', limit=2)                        # removes a's file and both its records
+        self.assertEqual([r['label'] for r in versions.list_versions(self.doc_path)], ['c', 'b again', 'b'])
+        self.assertEqual(len(self.stored_files()), 2)
 
     def test_index_written_before_keys_still_lists_restores_and_dedupes(self):
         doc_dir = versions._doc_dir(self.doc_path)
@@ -291,9 +342,10 @@ class HistorySizeTests(unittest.TestCase):
         self.assertEqual([r['label'] for r in versions.list_versions(self.doc_path)], ['old'])
         self.assertEqual(versions.read_version(self.doc_path, '20260101-000000-abcdef'), data)
         self.assertTrue(versions.next_removal(self.doc_path) == [])
-        versions.save_version(self.doc_path, self.pdf.doc.tobytes(garbage=4, deflate=True), 'new')
+        again = versions.save_version(self.doc_path, self.pdf.doc.tobytes(garbage=4, deflate=True), 'new')
+        self.assertEqual((again['id'], again['unchanged']), ('20260101-000000-abcdef', True))
         self.assertEqual(len(self.stored_files()), 1)
-        self.assertEqual(len(versions.list_versions(self.doc_path)), 2)
+        self.assertEqual(len(versions.list_versions(self.doc_path)), 1)
 
     def test_history_of_a_renamed_file_can_be_found_and_cleared(self):
         for n in range(2):
@@ -361,7 +413,7 @@ class ProtectedHistorySizeTests(ProtectedDocumentVersionTests):
         with patch.object(self.pdf, 'snapshot_bytes', wraps=self.pdf.snapshot_bytes) as encrypt:
             b = self.keyed_snapshot('b')
         encrypt.assert_not_called()  # content already stored: no slow encrypted copy is made
-        self.assertEqual(b['file'], a['id'])
+        self.assertEqual((b['id'], b['unchanged']), (a['id'], True))
         files = list(self.history.rglob('*.pdf'))
         self.assertEqual(len(files), 1)
         self.assert_protected(files[0])

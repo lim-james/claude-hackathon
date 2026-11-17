@@ -4,10 +4,12 @@ Snapshots live under a per-user directory (never next to the document and never
 uploaded). Each tracked document gets a folder named from a hash of its absolute
 path, holding the snapshot PDFs plus an index.json of metadata.
 
-A version whose content is already stored is recorded without a second copy:
-records carry a content ``key`` and the ``file`` they point at (old records
-have neither and point at their own id). Each document keeps at most LIMIT
-versions; saving one more removes the oldest, and the dialog says so first.
+Saving a version whose content is already stored adds nothing: the stored
+version already restores that state, and a second entry would only crowd out
+distinct ones. Records carry a content ``key`` and the ``file`` they point at
+(old records have neither and point at their own id). Each document keeps at
+most LIMIT snapshot files; saving one more removes the oldest, and the dialog
+says so first.
 Records also hold the document's full ``path``, so the history of a file that
 was moved or deleted can be found again (``orphans``) and cleared.
 """
@@ -107,19 +109,33 @@ def _remove_unreferenced(doc_dir, kept, removed):
             file.unlink(missing_ok=True)
 
 
+def _over_limit(doc_dir, stored, room):
+    """The records to remove so that at most ``room`` snapshot files remain.
+    The limit counts files, the versions actually kept: records sharing a file
+    (written by earlier builds) go together, aged by their newest record."""
+    newest = {}
+    for record in stored:  # oldest first, so the newest record sets each file's age
+        newest[_record_file(doc_dir, record)] = record.get('created', 0)
+    files = sorted(newest, key=newest.get)
+    drop = set(files[:max(0, len(files) - max(0, room))])
+    return [r for r in stored if _record_file(doc_dir, r) in drop]
+
+
 def next_removal(path, limit=LIMIT):
-    """The versions that saving one more version of ``path`` would remove."""
+    """The versions that saving one more distinct version of ``path`` would remove."""
     doc_dir = _doc_dir(path)
     stored = _stored(doc_dir, _load_index(doc_dir))
-    return stored[:max(0, len(stored) - limit + 1)]
+    return _over_limit(doc_dir, stored, max(1, limit) - 1)
 
 
-def save_version(path, data, label='', key=None, only_if_new=False, limit=LIMIT):
-    """Record a version of ``path``. Content that is already stored is not
-    written again. With ``only_if_new`` nothing is recorded when it is, and the
-    existing record is returned. Beyond ``limit`` versions the oldest go.
-    With a ``key``, ``data`` may be a function, called only when the content
-    is not stored yet (an encrypted snapshot is slow to make)."""
+def save_version(path, data, label='', key=None, limit=LIMIT, confirm=None):
+    """Record a version of ``path``. When its content is already stored nothing
+    is recorded or removed, and a copy of the stored record is returned with
+    ``unchanged`` set. Otherwise, beyond ``limit`` files the oldest go; with
+    ``confirm``, it is called first with the records that would go and nothing
+    is saved (None is returned) unless it returns True. With a ``key``, ``data``
+    may be a function, called only when the content is new (an encrypted
+    snapshot is slow to make)."""
     if callable(data) and key is None:
         data = data()
     if not callable(data) and not data:
@@ -130,8 +146,8 @@ def save_version(path, data, label='', key=None, only_if_new=False, limit=LIMIT)
     plain = key is None
     if plain:
         key = content_key(data)
-    same = None
-    for record in reversed(_stored(doc_dir, index)):
+    stored = _stored(doc_dir, index)
+    for record in reversed(stored):
         known = record.get('key')
         if known is None and plain and record.get('bytes') == len(data):
             # Saved before keys existed: fingerprint it once, only when the size matches.
@@ -139,39 +155,36 @@ def save_version(path, data, label='', key=None, only_if_new=False, limit=LIMIT)
                 known = record['key'] = content_key(_record_file(doc_dir, record).read_bytes())
             except OSError:
                 continue
+            if known == key:
+                try:
+                    _save_index(doc_dir, index)  # keep the fingerprint
+                except OSError:
+                    pass
         if known == key:
-            same = record
-            break
-    if same is not None and only_if_new:
-        return same
+            return dict(record, unchanged=True)
+    removed = _over_limit(doc_dir, stored, max(1, limit) - 1)
+    if confirm is not None and not confirm(removed):
+        return None
+    if callable(data):
+        data = data()
+        if not data:
+            raise ValueError('Nothing to snapshot yet.')
     version_id = time.strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6]
-    written = None
-    if same is not None:
-        file_id, pages, size = same.get('file') or same['id'], same.get('pages', 0), same.get('bytes', 0)
-    else:
-        if callable(data):
-            data = data()
-            if not data:
-                raise ValueError('Nothing to snapshot yet.')
-        file_id, written, size = version_id, doc_dir / f'{version_id}.pdf', len(data)
-        _write_atomic(written, data)
-        try:
-            with fitz.open(stream=data, filetype='pdf') as doc:
-                pages = len(doc)
-        except Exception:
-            pages = 0
+    written = doc_dir / f'{version_id}.pdf'
+    _write_atomic(written, data)
+    try:
+        with fitz.open(stream=data, filetype='pdf') as doc:
+            pages = len(doc)
+    except Exception:
+        pages = 0
     record = {'id': version_id, 'created': time.time(), 'label': label.strip(),
               'source': Path(path).name, 'path': str(Path(path).resolve()), 'pages': pages,
-              'bytes': size, 'key': key, 'file': file_id}
-    index.append(record)
-    stored = _stored(doc_dir, index)
-    removed = stored[:max(0, len(stored) - max(1, limit))]
-    kept = [r for r in index if not any(r is gone for gone in removed)]
+              'bytes': len(data), 'key': key, 'file': version_id}
+    kept = [r for r in index if not any(r is gone for gone in removed)] + [record]
     try:
         _save_index(doc_dir, kept)
     except BaseException:
-        if written is not None:
-            written.unlink(missing_ok=True)
+        written.unlink(missing_ok=True)
         raise
     _remove_unreferenced(doc_dir, kept, removed)
     return record

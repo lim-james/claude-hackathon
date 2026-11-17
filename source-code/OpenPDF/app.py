@@ -48,14 +48,15 @@ from ui_tools import enable_dpi_awareness
 from studio_ui import build_workspace
 
 
-def save_snapshot(app, label, only_if_new=False):
-    """Save Version history's copy of the open document. With a password the
-    content is recognised before the slow encrypted copy is made, so a state
-    already stored costs no encryption."""
+def save_snapshot(app, label, confirm=None):
+    """Save Version history's copy of the open document; a state already stored
+    adds nothing (see versions.save_version). With a password the content is
+    recognised before the slow encrypted copy is made, so a state already
+    stored costs no encryption."""
     if app.password:
         return save_version(app.path, lambda: app.pdf.snapshot_bytes(app.password), label,
-                            key=app.pdf.snapshot_key(app.password), only_if_new=only_if_new)
-    return save_version(app.path, app.pdf.snapshot_bytes(), label, only_if_new=only_if_new)
+                            key=app.pdf.snapshot_key(app.password), confirm=confirm)
+    return save_version(app.path, app.pdf.snapshot_bytes(), label, confirm=confirm)
 
 
 class App(tk.Tk):
@@ -1145,7 +1146,7 @@ class App(tk.Tk):
         replacement = PDF.unlocked(read_version(self.path, version_id), self.password)
         try:
             undo_step = self.pdf.bytes()
-            save_snapshot(self, 'Before restore', only_if_new=True)
+            save_snapshot(self, 'Before restore')
         except BaseException:
             replacement.close()
             raise
@@ -1182,7 +1183,7 @@ class App(tk.Tk):
                              + '. Save a version, then restore or compare it later.', style='Muted.TLabel', wraplength=660).pack(anchor='w')
         ttk.Label(frame, text=f'At most {VERSION_LIMIT} versions are kept. When there are {VERSION_LIMIT}, saving another '
                              '(including the copy Restore saves first) deletes the oldest; you are asked first. '
-                             'A version identical to one already kept takes no extra space.',
+                             'Saving a state that is already a kept version adds nothing and deletes nothing.',
                   style='Muted.TLabel', wraplength=660).pack(anchor='w', pady=(4, 0))
         saver = ttk.Frame(frame)
         saver.pack(fill='x', pady=8)
@@ -1212,18 +1213,27 @@ class App(tk.Tk):
             if not item:
                 raise ValueError('Select a version in the list first.')
             return item
-        def removal_note():
-            gone = next_removal(self.path)
+        def removal_note(gone=None):
+            gone = next_removal(self.path) if gone is None else gone
             return (f'There are already {VERSION_LIMIT} versions, the most kept, so this deletes the oldest: '
                     + ', '.join(self._version_text(r) for r in gone) + '.') if gone else ''
         def save():
-            note = removal_note()
-            if note and not mb.askyesno('Save version', note + ' Continue?', parent=window):
+            # Asked only once the state is known to be new: an unchanged save deletes nothing.
+            deleted = []
+            def confirm(gone):
+                deleted.extend(gone)
+                return not gone or mb.askyesno('Save version', removal_note(gone) + ' Continue?', parent=window)
+            record = save_snapshot(self, label.get(), confirm=confirm)
+            if record is None:
                 return
-            save_snapshot(self, label.get())
+            if record.get('unchanged'):
+                note = f'Nothing changed since {self._version_text(record)}; that version already holds this state, so nothing was added.'
+                self.status.set(note)
+                mb.showinfo('Save version', note, parent=window)
+                return
             label.set('')
             reload()
-            self.status.set('Version saved.' + (' The oldest version was deleted.' if note else ''))
+            self.status.set('Version saved.' + (' The oldest version was deleted.' if deleted else ''))
         def restore():
             item = selected()
             note = removal_note()
