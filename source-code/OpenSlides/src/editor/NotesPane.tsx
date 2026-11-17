@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, StickyNote } from 'lucide-react';
-import { checkpoint, currentSlide, mutate, useEditor } from '../store/editor';
+import { armCheckpoint, currentSlide, disarmCheckpoint, mutate, useEditor } from '../store/editor';
 
 export function NotesPane() {
   const open = useEditor((s) => s.notesOpen);
@@ -18,7 +18,8 @@ export function NotesPane() {
           className="notes-text"
           placeholder="What you want to say on this slide. Only you see these in presenter view."
           value={slide.notes}
-          onFocus={checkpoint}
+          onFocus={armCheckpoint}
+          onBlur={disarmCheckpoint}
           onKeyDown={(e) => e.stopPropagation()}
           onChange={(e) => {
             const v = e.target.value;

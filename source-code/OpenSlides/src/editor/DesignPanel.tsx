@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { ImageUp, Scaling, Trash2 } from 'lucide-react';
-import { checkpoint, useEditor } from '../store/editor';
+import { armCheckpoint, disarmCheckpoint, useEditor } from '../store/editor';
 import { applyThemePreset, setLogo, setThemeColor, setThemeFont } from '../store/actions';
 import { COLOR_LABELS, FONTS, THEME_PRESETS, fontStack } from '../model/theme';
 import { THEME_COLOR_KEYS } from '../model/types';
@@ -44,7 +44,8 @@ export function DesignPanel({ hideThemes = false }: { hideThemes?: boolean }) {
               <input
                 type="color"
                 value={theme.colors[k]}
-                onFocus={checkpoint}
+                onFocus={armCheckpoint}
+                onBlur={disarmCheckpoint}
                 onChange={(e) => setThemeColor(k, e.target.value, false)}
                 aria-label={COLOR_LABELS[k]}
               />

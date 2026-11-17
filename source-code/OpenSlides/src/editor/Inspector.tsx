@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { BarChart3, ImageUp, Link2, Minus, Plus, RotateCcw } from 'lucide-react';
-import { checkpoint, currentSlide, mutate, useEditor, type Panel } from '../store/editor';
+import { armCheckpoint, currentSlide, mutate, useEditor, type Panel } from '../store/editor';
 import { changeLayout, editElements, editSelected, fileToAsset, addAsset, replaceImage, resetToLayout } from '../store/actions';
 import type { AnimEffect, AnimTrigger, Animation, Background, ShapeKind, SlideElement, Transition } from '../model/types';
 import { ColorPicker, Field, NumberField, Section, Select, Slider, Toggle } from './ui';
@@ -87,7 +87,7 @@ function SelectionPanel() {
           </div>
         )}
         <Field label="Opacity">
-          <Slider value={el.opacity} min={0} max={1} step={0.01} onStart={checkpoint} onChange={(v) => editSelected((e) => void (e.opacity = v), { history: false })} />
+          <Slider value={el.opacity} min={0} max={1} step={0.01} onStart={armCheckpoint} onChange={(v) => editSelected((e) => void (e.opacity = v), { history: false })} />
           <span className="val">{Math.round(el.opacity * 100)}%</span>
         </Field>
       </Section>
@@ -178,16 +178,16 @@ function ImageSettings({ el }: { el: Extract<SlideElement, { type: 'image' }> })
       </Field>
       <NumberField label="Corner radius" value={el.radius} min={0} onChange={(v) => editSelected((e) => { if (e.type === 'image') e.radius = v; }, { touches: ['style'] })} />
       <Field label="Brightness">
-        <Slider value={f.brightness} min={0.3} max={1.7} step={0.01} onStart={checkpoint} onChange={(v) => setFilter('brightness', v)} />
+        <Slider value={f.brightness} min={0.3} max={1.7} step={0.01} onStart={armCheckpoint} onChange={(v) => setFilter('brightness', v)} />
       </Field>
       <Field label="Contrast">
-        <Slider value={f.contrast} min={0.3} max={1.7} step={0.01} onStart={checkpoint} onChange={(v) => setFilter('contrast', v)} />
+        <Slider value={f.contrast} min={0.3} max={1.7} step={0.01} onStart={armCheckpoint} onChange={(v) => setFilter('contrast', v)} />
       </Field>
       <Field label="Saturation">
-        <Slider value={f.saturate} min={0} max={2} step={0.01} onStart={checkpoint} onChange={(v) => setFilter('saturate', v)} />
+        <Slider value={f.saturate} min={0} max={2} step={0.01} onStart={armCheckpoint} onChange={(v) => setFilter('saturate', v)} />
       </Field>
       <Field label="Greyscale">
-        <Slider value={f.grayscale} min={0} max={1} step={0.01} onStart={checkpoint} onChange={(v) => setFilter('grayscale', v)} />
+        <Slider value={f.grayscale} min={0} max={1} step={0.01} onStart={armCheckpoint} onChange={(v) => setFilter('grayscale', v)} />
       </Field>
       <AltText el={el} />
     </Section>

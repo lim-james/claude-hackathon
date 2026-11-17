@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Check } from 'lucide-react';
-import { useEditor } from '../store/editor';
+import { disarmCheckpoint, useEditor } from '../store/editor';
 import { COLOR_LABELS, isThemeRef, resolveColor, toHex } from '../model/theme';
 import { THEME_COLOR_KEYS } from '../model/types';
 
@@ -163,6 +163,7 @@ export function Slider({ value, min, max, step, onChange, onStart }: { value: nu
       max={max}
       step={step}
       onPointerDown={onStart}
+      onPointerUp={onStart && disarmCheckpoint}
       onKeyDown={(e) => e.stopPropagation()}
       onChange={(e) => onChange(parseFloat(e.target.value))}
     />

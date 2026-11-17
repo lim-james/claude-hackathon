@@ -61,18 +61,36 @@ const set = (p: Partial<EditorState> | ((s: EditorState) => Partial<EditorState>
 const HISTORY_LIMIT = 80;
 
 export function openDeck(deck: Deck) {
+  armed = false;
   set({ ...initial, deck, slideId: deck.slides[0]?.id ?? null, notesOpen: get().notesOpen });
 }
 
 export function closeDeck() {
+  armed = false;
   set({ ...initial });
 }
 
 /** Saves the current deck to the undo stack. Call once before a run of non-history mutations. */
 export function checkpoint() {
+  armed = false;
   const { deck, past } = get();
   if (!deck) return;
   set({ past: [...past, deck].slice(-HISTORY_LIMIT), future: [] });
+}
+
+let armed = false;
+
+/**
+ * Like checkpoint, but the undo step is recorded at the next non-history change, not now:
+ * focusing a field or pressing a slider without changing anything keeps undo and redo as they were.
+ */
+export function armCheckpoint() {
+  armed = true;
+}
+
+/** Drops an armed checkpoint that no change used (call on blur or pointer up). */
+export function disarmCheckpoint() {
+  armed = false;
 }
 
 /** Applies an immer recipe to the deck. history=true records an undo step first. */
@@ -83,7 +101,11 @@ export function mutate(recipe: (d: Draft<Deck>) => void, history = true) {
   const next = produce(deck, (d) => {
     recipe(d);
   });
-  if (next !== deck) set({ deck: next });
+  if (next === deck) return;
+  if (armed) {
+    armed = false;
+    set((s) => ({ deck: next, past: [...s.past, deck].slice(-HISTORY_LIMIT), future: [] }));
+  } else set({ deck: next });
 }
 
 export function undo() {
