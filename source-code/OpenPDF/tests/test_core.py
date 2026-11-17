@@ -24,6 +24,29 @@ class PDFTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 page_numbers(spec, 3)
 
+    def test_page_ranges_accept_spaces_dashes_and_reversed(self):
+        for spec, pages in [('1,3-5', [0, 2, 3, 4]), ('5-2', [4, 3, 2, 1]), (' 2 , 4 ', [1, 3]),
+                            ('1 - 3', [0, 1, 2]), ('1\u20133', [0, 1, 2]), ('1\u20143', [0, 1, 2])]:
+            self.assertEqual(page_numbers(spec, 5), pages, spec)
+
+    def test_mistyped_page_ranges_say_what_was_wrong(self):
+        accepted = 'Enter pages between 1 and 5, e.g. 1,3-5.'
+        for spec, problem in [('1-2-3', '"1-2-3" is not a page number or a range.'),
+                              ('1-', '"1-" is not a page number or a range.'),
+                              ('a', '"a" is not a page number or a range.'),
+                              ('2..3', '"2..3" is not a page number or a range.'),
+                              ('2,x', '"x" is not a page number or a range.'),
+                              ('', 'No pages entered.'), ('  ', 'No pages entered.'),
+                              ('9', 'Page 9 is not in this document.'),
+                              ('3-9', 'Page 9 is not in this document.'),
+                              ('1-99999999999', 'Page 99999999999 is not in this document.')]:
+            with self.assertRaises(ValueError, msg=spec) as caught:
+                page_numbers(spec, 5)
+            self.assertEqual(str(caught.exception), f'{problem} {accepted}')
+        with self.assertRaises(ValueError) as caught:
+            page_numbers('x' * 500, 5)
+        self.assertLess(len(str(caught.exception)), 100)
+
     def test_merge_select_split(self):
         source = self.root / 'source.pdf'
         self.pdf.save(source)

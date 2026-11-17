@@ -5,6 +5,7 @@ import difflib
 import html
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,19 +17,36 @@ from text_tools import find_matches, replace_match, select_text
 from rich_boxes import apply_redactions
 
 
+_PAGE_PART = re.compile(r'(\d+)(?:\s*-\s*(\d+))?')
+
+
 def page_numbers(spec, count):
+    """0-based pages for a list such as ``3,1-2,5-4``, in the order given.
+
+    Every page-range dialog reads its input here, so all of them reject a
+    mistyped list with the same message: what was wrong, then what works.
+    En and em dashes count as hyphens, since pasted ranges often have them.
+    """
+    def error(problem):
+        return ValueError(f'{problem} Enter pages between 1 and {count}, e.g. 1,3-5.')
+
     result = []
-    for part in spec.split(','):
+    for part in spec.replace('\u2013', '-').replace('\u2014', '-').split(','):
         part = part.strip()
         if not part:
             continue
-        if '-' in part:
-            a, b = map(int, part.split('-', 1))
-            result.extend(range(a - 1, b, 1) if a <= b else range(a - 1, b - 2, -1))
-        else:
-            result.append(int(part) - 1)
-    if not result or any(p < 0 or p >= count for p in result):
-        raise ValueError(f'Enter pages between 1 and {count}, e.g. 1,3-5.')
+        match = _PAGE_PART.fullmatch(part)
+        if not match:
+            shown = part if len(part) <= 20 else part[:19] + '\u2026'
+            raise error(f'"{shown}" is not a page number or a range.')
+        a = int(match.group(1))
+        b = int(match.group(2) or a)
+        for page in (a, b):
+            if not 1 <= page <= count:
+                raise error(f'Page {page} is not in this document.')
+        result.extend(range(a - 1, b) if a <= b else range(a - 1, b - 2, -1))
+    if not result:
+        raise error('No pages entered.')
     return result
 
 
